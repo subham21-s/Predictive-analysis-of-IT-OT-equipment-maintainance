@@ -1,0 +1,55 @@
+
+╔══════════════════════════════════════════════════════════════════╗
+║       NALCO HEMM PREDICTIVE MAINTENANCE — FINAL ML REPORT       ║
+╚══════════════════════════════════════════════════════════════════╝
+
+Dataset      : 2,000 records × 54 clean features (no leakage)
+Failure Rate : 17.8%  (class-weighted training used)
+Train/Test   : 80% / 20%  |  5-Fold Cross-Validation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MODEL A — FAILURE CLASSIFICATION (Binary)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Model                 AUC       Accuracy   Recall   F1-Score
+  ─────────────────     ──────    ──────     ──────   ──────
+  Random Forest       0.9997    0.9975     0.9859   0.9929
+  Gradient Boosting   0.9999    0.9975     0.9859   0.9929
+  Voting Ensemble ★  0.9997    0.9975     0.9859   0.9929
+
+  CV AUC (Ensemble): 0.9995 ± 0.0011
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MODEL B — DAYS-TO-NEXT-FAILURE REGRESSION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Model                   R²        MAE (days)   RMSE (days)
+  ─────────────────       ──────    ──────       ──────
+  Random Forest Reg     0.4392    33.19         41.43
+  Gradient Boosting Reg 0.3636    35.90         44.13
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MODEL C — MAINTENANCE PRIORITY (Multi-class RF)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Accuracy    : 0.9850
+  Weighted F1 : 0.9843
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TOP 10 PREDICTIVE FEATURES (no-leakage model)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   1. Temp_Oil_Ratio                            0.09651
+   2. Brake_Replacement_Needed_enc              0.05918
+   3. Fuel_System_Condition_enc                 0.05006
+   4. Brake_Life_Remaining_pct                  0.04950
+   5. Brake_Condition_enc                       0.04934
+   6. Vib_RPM_Ratio                             0.04451
+   7. Vibration_mms                             0.04055
+   8. Engine_Temp_C                             0.03982
+   9. Battery_Voltage_V                         0.03973
+  10. Electrical_Replacement_Needed_enc         0.03481
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INTERPRETATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Model A predicts WILL the equipment fail (binary alert)
+• Model B predicts HOW MANY DAYS until the next failure
+• Model C predicts WHAT PRIORITY the maintenance should be
+• Use Recall as primary metric (catching all failures is critical)
