@@ -1,0 +1,83 @@
+
+╔══════════════════════════════════════════════════════════════════╗
+║          NALCO HEMM — SHAP EXPLAINABILITY REPORT                ║
+╚══════════════════════════════════════════════════════════════════╝
+
+SHAP = SHapley Additive exPlanations
+Each value tells you HOW MUCH a feature contributed to the prediction.
+Positive SHAP = pushes toward FAILURE
+Negative SHAP = pushes toward SAFE
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+GLOBAL — TOP 10 MOST IMPORTANT FEATURES (across all equipment)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Rank  Feature                                  Mean |SHAP|
+  ────  ───────────────────────────────────────  ──────────
+    1.  Temp_Oil_Ratio                            0.04760
+    2.  Brake_Replacement_Needed_enc              0.04009
+    3.  Brake_Condition_enc                       0.03296
+    4.  Brake_Life_Remaining_pct                  0.03223
+    5.  Vib_RPM_Ratio                             0.02897
+    6.  Vibration_mms                             0.02528
+    7.  Engine_Temp_C                             0.02438
+    8.  Fuel_System_Condition_enc                 0.02418
+    9.  Coolant_Level                             0.02267
+   10.  Engine_Temp_C_Status_enc                  0.02143
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HIGH-RISK EQUIPMENT EXPLANATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Failure Probability : 100.0%
+  Base Rate           : 50.1%  (average failure rate)
+
+  Factors PUSHING toward failure (+SHAP):
+    + Brake_Replacement_Needed_enc              SHAP=+0.1252  Value=1.000
+    + Brake_Life_Remaining_pct                  SHAP=+0.1154  Value=5.000
+    + Brake_Condition_enc                       SHAP=+0.1114  Value=1.000
+    + Vib_RPM_Ratio                             SHAP=+0.0911  Value=4.175
+    + Vibration_mms                             SHAP=+0.0903  Value=4.500
+
+  Factors PROTECTING against failure (-SHAP):
+    - Battery_Voltage_V                         SHAP=-0.0082  Value=24.000
+    - Coolant_Level                             SHAP=-0.0096  Value=0.850
+    - Fuel_System_Condition_enc                 SHAP=-0.0101  Value=0.000
+    - Engine_Temp_C                             SHAP=-0.0102  Value=81.000
+    - Temp_Oil_Ratio                            SHAP=-0.0197  Value=18.970
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HOW TO READ THE CHARTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  shap_summary_bar.png
+    Bar chart of average |SHAP| value per feature.
+    Longer bar = more important for predicting failure.
+
+  shap_summary_dot.png
+    Dot plot — each dot is one equipment reading.
+    RED dots  = high sensor value   BLUE = low sensor value
+    X-axis    = SHAP value (positive = increases failure risk)
+    Pattern   : If red dots are on the RIGHT, high values = dangerous.
+                If blue dots are on the RIGHT, low values = dangerous.
+
+  shap_waterfall_high_risk.png
+    Step-by-step breakdown for the MOST at-risk equipment.
+    Shows exactly which sensors triggered the failure alert.
+
+  shap_waterfall_low_risk.png
+    Same breakdown for the SAFEST equipment.
+    Good comparison — what does a healthy machine look like?
+
+  shap_dependence_*.png
+    How a single sensor's value relates to failure risk.
+    Upward trend = higher sensor value = more dangerous.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+INDUSTRY USE CASE AT NALCO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Without SHAP: "Machine HEMM-D004 will fail in 12 days."
+  With SHAP   : "Machine HEMM-D004 will fail in 12 days BECAUSE
+                 Vibration is 3.2x above normal AND
+                 Brake Life is below 15% AND
+                 Engine Temperature trend is rising."
+
+  This is what separates a student project from a production system.
+  Maintenance engineers can act on SHAP — they know WHAT to fix.
