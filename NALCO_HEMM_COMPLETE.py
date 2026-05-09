@@ -34,6 +34,7 @@
 # IMPORTS
 # ══════════════════════════════════════════════════════════════════════
 import os
+import sqlite3
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -582,6 +583,65 @@ alerts_df = pd.DataFrame(all_alerts)
 alerts_df.to_csv(f"{OUT}/hemm_equipment_alerts.csv", index=False, encoding='utf-8')
 print(f"   ✔ hemm_equipment_alerts.csv saved  ({len(alerts_df)} alert records)")
 
+# ── STEP 5b — Save to SQLite database ─────────────────────────────────
+print("\n[STEP 5b] Saving predictions to SQLite database...")
+DB_PATH = os.path.join(OUT, "hemm_alerts.db")
+
+# Add run timestamp to every row
+RUN_TIME = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
+alerts_df['run_timestamp'] = RUN_TIME
+
+# Connect and save — append mode keeps full history
+conn = sqlite3.connect(DB_PATH)
+
+# Main alerts table — full history
+alerts_df.to_sql("alerts_history", conn, if_exists="append", index=False)
+
+# Summary table per run — one row per equipment per run
+summary_df = (alerts_df.groupby('Equipment_ID')
+              .agg(
+                  Equipment_Type       =('Equipment_Type', 'first'),
+                  Failure_Probability  =('Failure_Probability_%', 'first'),
+                  Days_to_Failure      =('Days_to_Failure', 'first'),
+                  Alert_Level          =('Alert_Level', 'first'),
+                  Critical_Issues      =('Issue_Severity', lambda x: (x=='CRITICAL').sum()),
+                  High_Issues          =('Issue_Severity', lambda x: (x=='HIGH').sum()),
+                  Needs_Replacement    =('Recommended_Action', lambda x: x.str.contains('REPLACE', na=False).any()),
+                  run_timestamp        =('run_timestamp', 'first')
+              ).reset_index())
+summary_df.to_sql("equipment_summary", conn, if_exists="append", index=False)
+
+# Model metrics table — track model performance over time
+metrics_df = pd.DataFrame([{
+    'run_timestamp':  RUN_TIME,
+    'model_auc':      round(results_clf['Ensemble']['auc'], 4),
+    'model_accuracy': round(results_clf['Ensemble']['acc'], 4),
+    'model_recall':   round(results_clf['Ensemble']['recall'], 4),
+    'model_f1':       round(results_clf['Ensemble']['f1'], 4),
+    'reg_r2':         round(results_reg[best_reg_name]['r2'], 4),
+    'reg_mae':        round(results_reg[best_reg_name]['mae'], 2),
+    'total_machines': alerts_df['Equipment_ID'].nunique(),
+    'critical_count': int((alerts_df['Issue_Severity']=='CRITICAL').sum()),
+    'replace_count':  int(alerts_df['Recommended_Action'].str.contains('REPLACE', na=False).sum()),
+}])
+metrics_df.to_sql("model_metrics", conn, if_exists="append", index=False)
+
+conn.close()
+
+# Show database stats
+conn2 = sqlite3.connect(DB_PATH)
+total_runs    = pd.read_sql("SELECT COUNT(DISTINCT run_timestamp) as n FROM alerts_history", conn2).iloc[0,0]
+total_records = pd.read_sql("SELECT COUNT(*) as n FROM alerts_history", conn2).iloc[0,0]
+conn2.close()
+
+print(f"   ✔ hemm_alerts.db saved")
+print(f"      Location      : {DB_PATH}")
+print(f"      Tables        : alerts_history | equipment_summary | model_metrics")
+print(f"      Total runs    : {total_runs}")
+print(f"      Total records : {total_records}")
+print(f"      Run timestamp : {RUN_TIME}")
+print(f"   (Run the script again tomorrow — history grows automatically)")
+
 # ── Print Alert Report to Terminal ────────────────────────────────────
 top_risk = (alerts_df.groupby('Equipment_ID')
             .agg(Failure_Prob   =('Failure_Probability_%', 'first'),
@@ -792,17 +852,26 @@ print("   ALL DONE! OUTPUT FILES SAVED TO: outputs\\")
 print("=" * 70)
 print(f"""
    ML PERFORMANCE OUTPUTS:
-   ├── hemm_ml_results.png       ← Model charts (AUC, ROC, Confusion Matrix)
-   └── hemm_ml_summary.txt       ← Model accuracy numbers
+   ├── hemm_ml_results.png       <- Model charts (AUC, ROC, Confusion Matrix)
+   └── hemm_ml_summary.txt       <- Model accuracy numbers
 
    PRESCRIPTIVE ALERT OUTPUTS:
-   ├── hemm_equipment_alerts.csv ← Open in Excel — filter by Alert_Level
-   ├── hemm_alert_report.txt     ← Full maintenance report
-   └── hemm_alert_dashboard.png  ← Alert distribution + replacement chart
+   ├── hemm_equipment_alerts.csv <- Open in Excel, filter by Alert_Level
+   ├── hemm_alert_report.txt     <- Full maintenance report
+   ├── hemm_alert_dashboard.png  <- Alert distribution + replacement chart
+   └── hemm_alerts.db            <- SQLite history (grows every run)
+
+   SQLITE DATABASE TABLES:
+   • alerts_history    -> every alert for every machine, every run
+   • equipment_summary -> one row per machine per run (for trend charts)
+   • model_metrics     -> AUC, accuracy, MAE tracked over time
+
+   HOW TO QUERY THE DATABASE:
+   python -c "import sqlite3, pandas as pd; conn=sqlite3.connect('outputs/hemm_alerts.db'); print(pd.read_sql('SELECT * FROM equipment_summary ORDER BY run_timestamp DESC LIMIT 20', conn))"
 
    QUICK FILTERS IN EXCEL (hemm_equipment_alerts.csv):
-   • Alert_Level = CRITICAL          → Stop machine immediately
-   • Recommended_Action has REPLACE  → Order spare parts now
-   • Days_to_Failure < 14            → Urgent — less than 2 weeks
-   • Issue_Severity = HIGH           → Schedule this week
+   • Alert_Level = CRITICAL          -> Stop machine immediately
+   • Recommended_Action has REPLACE  -> Order spare parts now
+   • Days_to_Failure < 14            -> Urgent — less than 2 weeks
+   • Issue_Severity = HIGH           -> Schedule this week
 """)
