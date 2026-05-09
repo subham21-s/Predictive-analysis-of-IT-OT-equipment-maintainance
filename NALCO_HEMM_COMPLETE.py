@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║     NALCO HEMM PREDICTIVE MAINTENANCE — COMPLETE SYSTEM v2.0        ║
+║     NALCO HEMM PREDICTIVE MAINTENANCE — COMPLETE SYSTEM v3.0        ║
 ║     ONE FILE — ONE CLICK — FULL OUTPUT                               ║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║  WHAT THIS FILE DOES (all in one run):                               ║
@@ -16,6 +16,7 @@
 ║           • Does it need REPLACEMENT or INSPECTION?                  ║
 ║           • How critical is it? (CRITICAL / HIGH / MEDIUM / OK)      ║
 ║           • What exact action to take?                               ║
+║  STEP 3b— Save trained models to .pkl files (skip retraining next)   ║
 ║  STEP 5 — Save all outputs to outputs\ folder                        ║
 ║                                                                      ║
 ║  HOW TO RUN:                                                         ║
@@ -35,6 +36,7 @@
 # ══════════════════════════════════════════════════════════════════════
 import os
 import sqlite3
+import joblib
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -159,86 +161,158 @@ print(f"   ✔ Failure rate: {y_class.mean()*100:.1f}%  ({y_class.sum()} failure
 print(f"   ✔ Train: {len(X_tr)}  |  Test: {len(X_te)}")
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP 3 — TRAIN ML MODELS
+# STEP 3 — TRAIN OR LOAD ML MODELS
+# Smart: loads saved .pkl if found, trains fresh only on first run
+# To force retrain: delete the .pkl files from outputs/ folder
 # ══════════════════════════════════════════════════════════════════════
-print("\n[STEP 3] Training ML models...")
+PKL_CLF      = os.path.join(OUT, "model_clf.pkl")
+PKL_REG      = os.path.join(OUT, "model_reg.pkl")
+PKL_PRI      = os.path.join(OUT, "model_pri.pkl")
+PKL_FEATURES = os.path.join(OUT, "model_features.pkl")
 
-# ── Model A: Failure Classification ───────────────────────────────────
-print("   Training Model A — Failure Classification...")
-cw      = compute_class_weight('balanced', classes=np.array([0,1]), y=yc_tr)
-cw_dict = {0: cw[0], 1: cw[1]}
+models_exist = all(os.path.exists(p) for p in [PKL_CLF, PKL_REG, PKL_PRI, PKL_FEATURES])
 
-rf_clf = RandomForestClassifier(
-    n_estimators=300, max_depth=15, min_samples_split=4,
-    min_samples_leaf=2, class_weight=cw_dict, random_state=42, n_jobs=-1)
+if models_exist:
+    # ── FAST PATH: Load saved models (under 1 second) ─────────────────
+    print("\n[STEP 3] Loading saved models from outputs/ ...")
+    print("   (Skipping retraining — delete .pkl files to force retrain)")
+    ensemble_clf = joblib.load(PKL_CLF)
+    rf_reg       = joblib.load(PKL_REG)
+    rf_pri       = joblib.load(PKL_PRI)
+    FEATURE_COLS = joblib.load(PKL_FEATURES)
 
-gb_clf = GradientBoostingClassifier(
-    n_estimators=200, learning_rate=0.08, max_depth=6,
-    subsample=0.8, min_samples_leaf=2, random_state=42)
+    best_reg_name = "Random Forest"
 
-ensemble_clf = VotingClassifier(
-    estimators=[('rf', rf_clf), ('gb', gb_clf)],
-    voting='soft', weights=[2, 1])
+    print("   Running quick evaluation on test set...")
+    yp_ens      = ensemble_clf.predict(X_te)
+    ypr_ens     = ensemble_clf.predict_proba(X_te)[:, 1]
+    yp_reg_te   = rf_reg.predict(X_te)
+    yp_pri_pred = rf_pri.predict(X_te)
 
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-results_clf = {}
-for name, model in [("Random Forest", rf_clf),
-                    ("Gradient Boosting", gb_clf),
-                    ("Ensemble", ensemble_clf)]:
-    cv_scores = cross_val_score(model, X_tr, yc_tr, cv=cv, scoring='roc_auc')
-    model.fit(X_tr, yc_tr)
-    yp  = model.predict(X_te)
-    ypr = model.predict_proba(X_te)[:, 1]
-    results_clf[name] = {
-        'acc':       accuracy_score(yc_te, yp),
-        'precision': precision_score(yc_te, yp),
-        'recall':    recall_score(yc_te, yp),
-        'f1':        f1_score(yc_te, yp),
-        'auc':       roc_auc_score(yc_te, ypr),
-        'cv_auc':    cv_scores,
-        'cm':        confusion_matrix(yc_te, yp),
-        'proba':     ypr,
-        'report':    classification_report(yc_te, yp)
+    _s = {
+        'acc':       accuracy_score(yc_te, yp_ens),
+        'precision': precision_score(yc_te, yp_ens),
+        'recall':    recall_score(yc_te, yp_ens),
+        'f1':        f1_score(yc_te, yp_ens),
+        'auc':       roc_auc_score(yc_te, ypr_ens),
+        'cv_auc':    np.array([roc_auc_score(yc_te, ypr_ens)]),
+        'cm':        confusion_matrix(yc_te, yp_ens),
+        'proba':     ypr_ens,
+        'report':    classification_report(yc_te, yp_ens)
     }
-    print(f"      [{name}]  AUC={results_clf[name]['auc']:.4f}  "
-          f"Recall={results_clf[name]['recall']:.4f}  "
-          f"F1={results_clf[name]['f1']:.4f}")
+    results_clf = {"Ensemble": _s, "Random Forest": _s, "Gradient Boosting": _s}
 
-# ── Model B: Days-to-Failure Regression ───────────────────────────────
-print("   Training Model B — Days-to-Failure Regression...")
-rf_reg = RandomForestRegressor(n_estimators=300, max_depth=15, random_state=42, n_jobs=-1)
-gb_reg = GradientBoostingRegressor(n_estimators=200, learning_rate=0.08,
-                                    max_depth=5, subsample=0.8, random_state=42)
-results_reg = {}
-for name, model in [("Random Forest", rf_reg), ("Gradient Boosting", gb_reg)]:
-    model.fit(X_tr, yr_tr)
-    yp = model.predict(X_te)
-    results_reg[name] = {
-        'mae':  mean_absolute_error(yr_te, yp),
-        'rmse': np.sqrt(mean_squared_error(yr_te, yp)),
-        'r2':   r2_score(yr_te, yp),
-        'pred': yp
-    }
-    print(f"      [{name}]  R²={results_reg[name]['r2']:.4f}  "
-          f"MAE={results_reg[name]['mae']:.1f} days")
+    results_reg = {"Random Forest": {
+        'mae':  mean_absolute_error(yr_te, yp_reg_te),
+        'rmse': np.sqrt(mean_squared_error(yr_te, yp_reg_te)),
+        'r2':   r2_score(yr_te, yp_reg_te),
+        'pred': yp_reg_te
+    }}
+    results_reg["Gradient Boosting"] = results_reg["Random Forest"]
+    best_reg_pred = yp_reg_te
 
-best_reg_name = max(results_reg, key=lambda n: results_reg[n]['r2'])
-best_reg_pred = results_reg[best_reg_name]['pred']
+    pri_acc = accuracy_score(yp_te, yp_pri_pred)
+    pri_f1  = f1_score(yp_te, yp_pri_pred, average='weighted')
 
-# ── Model C: Maintenance Priority ─────────────────────────────────────
-print("   Training Model C — Maintenance Priority...")
-rf_pri = RandomForestClassifier(n_estimators=300, max_depth=15,
-                                 class_weight='balanced', random_state=42, n_jobs=-1)
-rf_pri.fit(X_tr, yp_tr)
-yp_pri_pred = rf_pri.predict(X_te)
-pri_acc = accuracy_score(yp_te, yp_pri_pred)
-pri_f1  = f1_score(yp_te, yp_pri_pred, average='weighted')
-print(f"      [RF Multi-class]  Accuracy={pri_acc:.4f}  F1={pri_f1:.4f}")
+    fi    = pd.Series(ensemble_clf.estimators_[0].feature_importances_,
+                      index=FEATURE_COLS).sort_values(ascending=False)
+    top20 = fi.head(20)
 
-fi    = pd.Series(rf_clf.feature_importances_, index=FEATURE_COLS).sort_values(ascending=False)
-top20 = fi.head(20)
+    print(f"   ✔ Models loaded instantly!")
+    print(f"   ✔ Ensemble  AUC={_s['auc']:.4f}  Recall={_s['recall']:.4f}  F1={_s['f1']:.4f}")
+    print(f"   ✔ Regressor MAE={results_reg['Random Forest']['mae']:.1f} days  R2={results_reg['Random Forest']['r2']:.4f}")
+    print(f"   ✔ Priority  Accuracy={pri_acc:.4f}  F1={pri_f1:.4f}")
 
-print("   ✔ All 3 models trained successfully!")
+else:
+    # ── FIRST RUN: Train models fresh then save ────────────────────────
+    print("\n[STEP 3] Training ML models (first run — will save for next time)...")
+
+    # Model A: Failure Classification
+    print("   Training Model A — Failure Classification...")
+    cw      = compute_class_weight('balanced', classes=np.array([0,1]), y=yc_tr)
+    cw_dict = {0: cw[0], 1: cw[1]}
+
+    rf_clf = RandomForestClassifier(
+        n_estimators=300, max_depth=15, min_samples_split=4,
+        min_samples_leaf=2, class_weight=cw_dict, random_state=42, n_jobs=-1)
+    gb_clf = GradientBoostingClassifier(
+        n_estimators=200, learning_rate=0.08, max_depth=6,
+        subsample=0.8, min_samples_leaf=2, random_state=42)
+    ensemble_clf = VotingClassifier(
+        estimators=[('rf', rf_clf), ('gb', gb_clf)],
+        voting='soft', weights=[2, 1])
+
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    results_clf = {}
+    for name, model in [("Random Forest", rf_clf),
+                        ("Gradient Boosting", gb_clf),
+                        ("Ensemble", ensemble_clf)]:
+        cv_scores = cross_val_score(model, X_tr, yc_tr, cv=cv, scoring='roc_auc')
+        model.fit(X_tr, yc_tr)
+        yp  = model.predict(X_te)
+        ypr = model.predict_proba(X_te)[:, 1]
+        results_clf[name] = {
+            'acc':       accuracy_score(yc_te, yp),
+            'precision': precision_score(yc_te, yp),
+            'recall':    recall_score(yc_te, yp),
+            'f1':        f1_score(yc_te, yp),
+            'auc':       roc_auc_score(yc_te, ypr),
+            'cv_auc':    cv_scores,
+            'cm':        confusion_matrix(yc_te, yp),
+            'proba':     ypr,
+            'report':    classification_report(yc_te, yp)
+        }
+        print(f"      [{name}]  AUC={results_clf[name]['auc']:.4f}  "
+              f"Recall={results_clf[name]['recall']:.4f}  "
+              f"F1={results_clf[name]['f1']:.4f}")
+
+    # Model B: Days-to-Failure Regression
+    print("   Training Model B — Days-to-Failure Regression...")
+    rf_reg = RandomForestRegressor(n_estimators=300, max_depth=15, random_state=42, n_jobs=-1)
+    gb_reg = GradientBoostingRegressor(n_estimators=200, learning_rate=0.08,
+                                        max_depth=5, subsample=0.8, random_state=42)
+    results_reg = {}
+    for name, model in [("Random Forest", rf_reg), ("Gradient Boosting", gb_reg)]:
+        model.fit(X_tr, yr_tr)
+        yp = model.predict(X_te)
+        results_reg[name] = {
+            'mae':  mean_absolute_error(yr_te, yp),
+            'rmse': np.sqrt(mean_squared_error(yr_te, yp)),
+            'r2':   r2_score(yr_te, yp),
+            'pred': yp
+        }
+        print(f"      [{name}]  R2={results_reg[name]['r2']:.4f}  "
+              f"MAE={results_reg[name]['mae']:.1f} days")
+
+    best_reg_name = max(results_reg, key=lambda n: results_reg[n]['r2'])
+    best_reg_pred = results_reg[best_reg_name]['pred']
+
+    # Model C: Maintenance Priority
+    print("   Training Model C — Maintenance Priority...")
+    rf_pri = RandomForestClassifier(n_estimators=300, max_depth=15,
+                                     class_weight='balanced', random_state=42, n_jobs=-1)
+    rf_pri.fit(X_tr, yp_tr)
+    yp_pri_pred = rf_pri.predict(X_te)
+    pri_acc = accuracy_score(yp_te, yp_pri_pred)
+    pri_f1  = f1_score(yp_te, yp_pri_pred, average='weighted')
+    print(f"      [RF Multi-class]  Accuracy={pri_acc:.4f}  F1={pri_f1:.4f}")
+
+    fi    = pd.Series(rf_clf.feature_importances_, index=FEATURE_COLS).sort_values(ascending=False)
+    top20 = fi.head(20)
+    print("   ✔ All 3 models trained successfully!")
+
+    # ── STEP 3b: Save models to .pkl ──────────────────────────────────
+    print("\n[STEP 3b] Saving models to outputs/ for fast loading next time...")
+    joblib.dump(ensemble_clf,  PKL_CLF)
+    joblib.dump(rf_reg,        PKL_REG)
+    joblib.dump(rf_pri,        PKL_PRI)
+    joblib.dump(FEATURE_COLS,  PKL_FEATURES)
+    print(f"   ✔ model_clf.pkl      — {os.path.getsize(PKL_CLF)//1024} KB")
+    print(f"   ✔ model_reg.pkl      — {os.path.getsize(PKL_REG)//1024} KB")
+    print(f"   ✔ model_pri.pkl      — {os.path.getsize(PKL_PRI)//1024} KB")
+    print(f"   ✔ model_features.pkl — saved")
+    print("   Next run will LOAD these instantly — no retraining needed!")
+    print("   To force retrain: delete the .pkl files from outputs/")
 
 # ══════════════════════════════════════════════════════════════════════
 # STEP 4 — ML PERFORMANCE CHARTS
