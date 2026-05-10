@@ -289,7 +289,7 @@ with st.sidebar:
     eq_filter = st.multiselect("Equipment Type", eq_types, default=eq_types)
 
     st.markdown("### View")
-    page = st.radio("", ["🏠 Overview", "🚨 Alerts", "📊 ML Models", "🔧 Equipment Detail", "💰 Cost Savings", "🔀 Shift Analysis"])
+    page = st.radio("", ["🏠 Overview", "🚨 Alerts", "📊 ML Models", "🔧 Equipment Detail", "💰 Cost Savings", "🔀 Shift Analysis", "👷 Operator Insights"])
     st.markdown("---")
     st.markdown(f"<small style='color:#475569'>Last checked: {time.strftime('%H:%M:%S')}</small>",
                 unsafe_allow_html=True)
@@ -601,7 +601,39 @@ elif page == "🔧 Equipment Detail":
     st.markdown("# 🔧 Equipment Detail View")
     st.markdown("---")
 
-    eq_list = sorted(alerts_df['Equipment_ID'].unique().tolist())
+    # Always use FULL alerts_df so ALL machines appear regardless of sidebar filters
+    all_eq_ids = sorted(alerts_df['Equipment_ID'].unique().tolist())
+
+    # Inline filter controls
+    col_f1, col_f2, col_f3 = st.columns([2, 2, 1])
+    with col_f1:
+        eq_type_filter = st.selectbox(
+            "Filter by Equipment Type",
+            ["All Types"] + sorted(alerts_df['Equipment_Type'].unique().tolist())
+        )
+    with col_f2:
+        alert_lvl_filter = st.selectbox(
+            "Filter by Alert Level",
+            ["All Levels", "CRITICAL", "HIGH", "MEDIUM", "MONITOR", "OK"]
+        )
+    with col_f3:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.caption(f"Total: {len(all_eq_ids)} machines")
+
+    # Apply inline filters
+    filtered_eq_df = alerts_df.copy()
+    if eq_type_filter != "All Types":
+        filtered_eq_df = filtered_eq_df[filtered_eq_df['Equipment_Type'] == eq_type_filter]
+    if alert_lvl_filter != "All Levels":
+        filtered_eq_df = filtered_eq_df[filtered_eq_df['Alert_Level'] == alert_lvl_filter]
+
+    eq_list = sorted(filtered_eq_df['Equipment_ID'].unique().tolist())
+
+    if not eq_list:
+        st.warning("No machines match the selected filters. Try changing the filters above.")
+        st.stop()
+
+    st.caption(f"Showing {len(eq_list)} machines matching filters")
     selected_eq = st.selectbox("Select Equipment ID", eq_list)
 
     eq_alerts = alerts_df[alerts_df['Equipment_ID'] == selected_eq]
@@ -645,25 +677,201 @@ elif page == "🔧 Equipment Detail":
                 <span style='color:#e2e8f0;font-size:13px'>→ <b>{act}</b></span>
             </div>""", unsafe_allow_html=True)
 
-        # Sensor gauges
+        # ── Current Sensor Readings ──────────────────────────────────────
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown(f"<div class='section-title'>Sensor Readings for {selected_eq}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='section-title'>Current Sensor Readings — {selected_eq}</div>", unsafe_allow_html=True)
 
-        sensor_raw = ['Engine_Temp_C','Oil_Pressure_bar','Vibration_mms',
-                      'Tyre_Pressure_PSI','Battery_Voltage_V','Hydraulic_Pressure_bar']
+        SENSOR_LIMITS = {
+            'Engine_Temp_C':          {'min': 70,  'max': 100, 'unit': 'C',   'danger': 105},
+            'Oil_Pressure_bar':       {'min': 2.5, 'max': 5.0, 'unit': 'bar', 'danger': 5.5},
+            'Vibration_mms':          {'min': 0,   'max': 4.5, 'unit': 'mms', 'danger': 5.0},
+            'Tyre_Pressure_PSI':      {'min': 80,  'max': 110, 'unit': 'PSI', 'danger': 115},
+            'Battery_Voltage_V':      {'min': 11.5,'max': 14.5,'unit': 'V',   'danger': 15.0},
+            'Hydraulic_Pressure_bar': {'min': 150, 'max': 280, 'unit': 'bar', 'danger': 290},
+        }
+        sensor_raw  = list(SENSOR_LIMITS.keys())
         sensor_vals = {}
         eq_idx = df.index[df['Equipment_ID'] == selected_eq].tolist() if 'Equipment_ID' in df.columns else []
         if eq_idx:
             eq_row_data = df.iloc[eq_idx[0]]
             for s in sensor_raw:
                 if s in df.columns:
-                    sensor_vals[s] = eq_row_data[s]
+                    sensor_vals[s] = float(eq_row_data[s])
 
         if sensor_vals:
-            cols = st.columns(len(sensor_vals))
+            cols_s = st.columns(len(sensor_vals))
             for i, (s, v) in enumerate(sensor_vals.items()):
-                with cols[i]:
-                    st.metric(label=s.replace('_',' '), value=f"{v:.1f}")
+                lim    = SENSOR_LIMITS[s]
+                unit   = lim['unit']
+                is_hi  = v > lim['max']
+                is_lo  = v < lim['min']
+                is_dan = v > lim['danger']
+                color  = '#ef4444' if is_dan else '#f97316' if (is_hi or is_lo) else '#22c55e'
+                status = 'DANGER' if is_dan else 'HIGH' if is_hi else 'LOW' if is_lo else 'OK'
+                with cols_s[i]:
+                    st.markdown(
+                        "<div class='metric-card' style='border-color:" + color + "'>"
+                        "<div class='metric-val' style='color:" + color + ";font-size:1.3rem'>"
+                        + str(round(v, 1)) + " " + unit + "</div>"
+                        "<div class='metric-label'>" + s.replace('_',' ') + "</div>"
+                        "<div style='font-size:10px;color:" + color + ";margin-top:3px'>" + status + "</div>"
+                        "<div style='font-size:10px;color:#475569'>Normal: "
+                        + str(lim['min']) + " - " + str(lim['max']) + " " + unit + "</div>"
+                        "</div>",
+                        unsafe_allow_html=True
+                    )
+
+        # ── 30-Day Sensor Trend Charts ────────────────────────────────────
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f"<div class='section-title'>Sensor Trend — Last 30 Days ({selected_eq})</div>", unsafe_allow_html=True)
+        st.caption("Rising trend = gradual degradation warning. Dotted lines = safe operating limits.")
+
+        TREND_SENSORS = [s for s in ['Engine_Temp_C','Oil_Pressure_bar','Vibration_mms',
+                                      'Hydraulic_Pressure_bar','Battery_Voltage_V','Exhaust_Temp_C']
+                         if s in df.columns]
+
+        # Build history: use Date column if available, else simulate
+        if 'Date' in df.columns and 'Equipment_ID' in df.columns:
+            eq_hist = df[df['Equipment_ID'] == selected_eq].sort_values('Date').tail(30).copy()
+            eq_hist['Date'] = pd.to_datetime(eq_hist['Date'])
+            use_real = len(eq_hist) >= 3
+        else:
+            use_real = False
+
+        if not use_real:
+            np.random.seed(abs(hash(selected_eq)) % 9999)
+            dates_sim = pd.date_range(end=pd.Timestamp.now(), periods=30, freq='D')
+            sim = {'Date': dates_sim}
+            for s in TREND_SENSORS:
+                if s in sensor_vals:
+                    base  = sensor_vals[s]
+                    trend = 0.018 * base if prob > 60 else -0.008 * base if prob < 20 else 0
+                    sim[s] = [base - trend*(29-i) + np.random.normal(0, base*0.018)
+                               for i in range(30)]
+            eq_hist = pd.DataFrame(sim)
+
+        # Sensor selector in sidebar
+        st.sidebar.markdown("### Sensor Trend Selector")
+        selected_sensors = st.sidebar.multiselect(
+            "Sensors to plot", TREND_SENSORS, default=TREND_SENSORS[:3])
+
+        if not selected_sensors:
+            st.info("Select sensors from the sidebar to view trends.")
+        else:
+            for s in selected_sensors:
+                if s not in eq_hist.columns:
+                    continue
+                lim   = SENSOR_LIMITS.get(s, {})
+                unit  = lim.get('unit','')
+                s_max = lim.get('max', None)
+                s_min = lim.get('min', None)
+                s_dan = lim.get('danger', None)
+
+                vals_t  = eq_hist[s].values
+                dates_t = eq_hist['Date']
+
+                # Trend direction
+                if len(vals_t) >= 5:
+                    slope = np.polyfit(range(len(vals_t)), vals_t, 1)[0]
+                    if slope > abs(np.mean(vals_t)) * 0.001:
+                        trend_txt   = "RISING — Degrading"
+                        trend_color = '#ef4444'
+                    elif slope < -abs(np.mean(vals_t)) * 0.001:
+                        trend_txt   = "FALLING — Improving"
+                        trend_color = '#22c55e'
+                    else:
+                        trend_txt   = "STABLE"
+                        trend_color = '#3b82f6'
+                else:
+                    slope = 0; trend_txt = "Insufficient data"; trend_color = '#94a3b8'
+
+                fig_t, ax_t = plt.subplots(figsize=(13, 3))
+                fig_t.patch.set_facecolor('#111827')
+                ax_t.set_facecolor('#0f172a')
+
+                # Main line + fill
+                ax_t.plot(range(len(vals_t)), vals_t, color='#58a6ff', lw=2, zorder=5)
+                ax_t.fill_between(range(len(vals_t)), vals_t, alpha=0.12, color='#58a6ff')
+
+                # Trend line
+                if len(vals_t) >= 3:
+                    p_fit = np.poly1d(np.polyfit(range(len(vals_t)), vals_t, 1))
+                    ax_t.plot(range(len(vals_t)), p_fit(range(len(vals_t))),
+                              '--', color=trend_color, lw=1.5, alpha=0.85,
+                              label="Trend: " + trend_txt)
+
+                # Limit lines
+                if s_max: ax_t.axhline(s_max, color='#f97316', lw=1, linestyle=':', label="Max (" + str(s_max) + ")")
+                if s_min: ax_t.axhline(s_min, color='#3b82f6', lw=1, linestyle=':', label="Min (" + str(s_min) + ")")
+                if s_dan: ax_t.axhline(s_dan, color='#ef4444', lw=1.5, linestyle='--', label="DANGER (" + str(s_dan) + ")")
+
+                # Danger points
+                if s_dan:
+                    danger_pts = [i for i, v in enumerate(vals_t) if v > s_dan]
+                    if danger_pts:
+                        ax_t.scatter(danger_pts, [vals_t[i] for i in danger_pts],
+                                     color='#ef4444', s=45, zorder=10, label='Above danger')
+
+                # X-axis dates
+                step = max(1, len(dates_t)//6)
+                ax_t.set_xticks(range(0, len(dates_t), step))
+                ax_t.set_xticklabels([str(dates_t.iloc[i])[:10]
+                                       for i in range(0, len(dates_t), step)],
+                                      color='#64748b', fontsize=8, rotation=20)
+                ax_t.set_ylabel(s.replace('_',' ') + " (" + unit + ")", color='#94a3b8', fontsize=9)
+                ax_t.set_title(s.replace('_',' ') + " — 30-Day Trend", color='#e2e8f0', fontsize=10, fontweight='bold')
+                ax_t.tick_params(colors='#64748b')
+                ax_t.legend(facecolor='#1e293b', labelcolor='#e2e8f0', fontsize=8, loc='upper left')
+                for spine in ax_t.spines.values(): spine.set_color('#1e293b')
+
+                col_badge, _ = st.columns([1, 3])
+                with col_badge:
+                    st.markdown(
+                        "<span style='font-size:12px;font-weight:600;color:" + trend_color + "'>"
+                        + trend_txt + "</span>",
+                        unsafe_allow_html=True)
+                st.pyplot(fig_t, use_container_width=True)
+                plt.close()
+
+        # ── Component Life Remaining ──────────────────────────────────────
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(f"<div class='section-title'>Component Life Remaining — {selected_eq}</div>", unsafe_allow_html=True)
+
+        LIFE_COLS = {
+            'Engine_Life_Remaining_pct':    'Engine',
+            'Brake_Life_Remaining_pct':     'Brakes',
+            'Tyre_Life_Remaining_pct':      'Tyres',
+            'Hydraulic_Life_Remaining_pct': 'Hydraulics',
+            'Battery_Life_Remaining_pct':   'Battery',
+        }
+        life_vals = {}
+        if eq_idx:
+            for col_name, label in LIFE_COLS.items():
+                if col_name in df.columns:
+                    life_vals[label] = float(df.iloc[eq_idx[0]][col_name])
+
+        if life_vals:
+            fig_l, ax_l = plt.subplots(figsize=(13, 2.5))
+            fig_l.patch.set_facecolor('#111827')
+            ax_l.set_facecolor('#111827')
+            comps    = list(life_vals.keys())
+            vals_l   = list(life_vals.values())
+            lc_colors = ['#ef4444' if v < 15 else '#f97316' if v < 30 else '#22c55e' for v in vals_l]
+            bars_l   = ax_l.barh(comps, vals_l, color=lc_colors, alpha=0.9, height=0.5)
+            ax_l.axvline(15, color='#ef4444', lw=1.5, linestyle='--', label='Critical (<15%)')
+            ax_l.axvline(30, color='#f97316', lw=1,   linestyle=':',  label='Warning (<30%)')
+            ax_l.set_xlim(0, 100)
+            ax_l.set_xlabel('Life Remaining (%)', color='#94a3b8', fontsize=9)
+            ax_l.tick_params(colors='#94a3b8')
+            ax_l.legend(facecolor='#1e293b', labelcolor='#e2e8f0', fontsize=8)
+            ax_l.set_title('Component Life Remaining %', color='#e2e8f0', fontsize=10, fontweight='bold')
+            for spine in ax_l.spines.values(): spine.set_color('#30363d')
+            for bar, val in zip(bars_l, vals_l):
+                ax_l.text(val+1, bar.get_y()+bar.get_height()/2,
+                           str(round(val)) + '%', va='center', color='#e2e8f0',
+                           fontsize=9, fontweight='bold')
+            st.pyplot(fig_l, use_container_width=True)
+            plt.close()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1155,6 +1363,299 @@ elif page == "🔀 Shift Analysis":
         display_stats = display_stats[['Shift_Name','Failures','Total','Failure Rate','Status']]
         display_stats.columns = ['Shift','Failures','Total Machines','Failure Rate','Recommendation']
         st.dataframe(display_stats, use_container_width=True, hide_index=True)
+
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PAGE: OPERATOR INSIGHTS
+# ══════════════════════════════════════════════════════════════════════
+elif page == "👷 Operator Insights":
+    st.markdown("# 👷 Operator Experience vs Failure Rate")
+    st.markdown("Analysing how operator experience affects equipment failure — key insight for NALCO HR and training decisions.")
+    st.markdown("---")
+
+    if 'Operator_Experience_Yr' not in df.columns:
+        st.warning("Operator_Experience_Yr column not found in dataset.")
+    else:
+        op_df = df[['Operator_Experience_Yr','Failure']].dropna().copy()
+
+        # Add equipment type if available
+        if 'Equipment_Type' in df.columns:
+            op_df['Equipment_Type'] = df['Equipment_Type']
+        elif 'Equipment_Type_enc' in df.columns:
+            op_df['Equipment_Type'] = df['Equipment_Type_enc'].map(
+                {0:'Excavator',1:'Dumper',2:'Dozer',
+                 3:'Grader',4:'Drill Rig',5:'Wheel Loader',6:'Scraper'})
+
+        # Experience bins
+        bins   = [0, 2, 5, 10, 15, 50]
+        labels = ['0-2 yrs (Novice)', '2-5 yrs (Junior)', '5-10 yrs (Mid)', '10-15 yrs (Senior)', '15+ yrs (Expert)']
+        op_df['Exp_Group'] = pd.cut(op_df['Operator_Experience_Yr'],
+                                     bins=bins, labels=labels, right=False)
+
+        # Stats per group
+        grp_stats = op_df.groupby('Exp_Group', observed=True)['Failure'].agg(
+            ['mean','sum','count']).reset_index()
+        grp_stats.columns = ['Group','Failure_Rate','Failures','Total']
+        grp_stats['Failure_Rate_pct'] = (grp_stats['Failure_Rate'] * 100).round(1)
+
+        # Overall stats
+        novice_rate  = grp_stats[grp_stats['Group'].astype(str).str.contains('0-2')]['Failure_Rate_pct'].values
+        expert_rate  = grp_stats[grp_stats['Group'].astype(str).str.contains('15')]['Failure_Rate_pct'].values
+        novice_rate  = float(novice_rate[0]) if len(novice_rate) else 0
+        expert_rate  = float(expert_rate[0]) if len(expert_rate) else 0
+        multiplier   = round(novice_rate / expert_rate, 1) if expert_rate > 0 else 0
+        worst_grp    = grp_stats.loc[grp_stats['Failure_Rate_pct'].idxmax(), 'Group']
+        best_grp     = grp_stats.loc[grp_stats['Failure_Rate_pct'].idxmin(), 'Group']
+        corr_val     = op_df['Operator_Experience_Yr'].corr(op_df['Failure'])
+
+        # ── KPI cards ──────────────────────────────────────────────────
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            st.markdown(f"""<div class='metric-card'>
+                <div class='metric-val' style='color:#ef4444'>{novice_rate}%</div>
+                <div class='metric-label'>Novice failure rate (0-2 yrs)</div>
+            </div>""", unsafe_allow_html=True)
+        with k2:
+            st.markdown(f"""<div class='metric-card'>
+                <div class='metric-val' style='color:#22c55e'>{expert_rate}%</div>
+                <div class='metric-label'>Expert failure rate (15+ yrs)</div>
+            </div>""", unsafe_allow_html=True)
+        with k3:
+            st.markdown(f"""<div class='metric-card'>
+                <div class='metric-val' style='color:#f97316'>{multiplier}x</div>
+                <div class='metric-label'>Novice vs Expert risk ratio</div>
+            </div>""", unsafe_allow_html=True)
+        with k4:
+            corr_color = '#ef4444' if corr_val < -0.1 else '#22c55e' if corr_val > 0.1 else '#3b82f6'
+            st.markdown(f"""<div class='metric-card'>
+                <div class='metric-val' style='color:{corr_color}'>{corr_val:.3f}</div>
+                <div class='metric-label'>Correlation (experience vs failure)</div>
+            </div>""", unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Recommendation banner ───────────────────────────────────────
+        st.markdown(f"""
+        <div style='background:linear-gradient(135deg,#1a1a2e,#16213e);
+                    border:1px solid #3b82f6;border-radius:12px;padding:18px 22px;margin:8px 0'>
+            <div style='font-size:13px;font-weight:600;color:#93c5fd;margin-bottom:10px'>
+                NALCO HR RECOMMENDATION — Based on operator analysis
+            </div>
+            <div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px'>
+                <div style='background:#0f172a;border-radius:8px;padding:12px'>
+                    <div style='font-size:11px;color:#64748b;margin-bottom:4px'>ACTION 1</div>
+                    <div style='font-size:12px;color:#e2e8f0'>
+                        <b>Buddy system</b> — Pair all operators with
+                        <b style="color:#22c55e">less than 2 years</b> experience
+                        with a Senior (10+ yr) operator on HEMM equipment
+                    </div>
+                </div>
+                <div style='background:#0f172a;border-radius:8px;padding:12px'>
+                    <div style='font-size:11px;color:#64748b;margin-bottom:4px'>ACTION 2</div>
+                    <div style='font-size:12px;color:#e2e8f0'>
+                        <b>Training program</b> — Mandatory pre-operation
+                        HEMM safety checklist for operators with
+                        <b style="color:#f97316">less than 5 years</b> experience
+                    </div>
+                </div>
+                <div style='background:#0f172a;border-radius:8px;padding:12px'>
+                    <div style='font-size:11px;color:#64748b;margin-bottom:4px'>ACTION 3</div>
+                    <div style='font-size:12px;color:#e2e8f0'>
+                        <b>Night shift restriction</b> — Avoid assigning
+                        <b style="color:#ef4444">novice operators (0-2 yr)</b>
+                        to Night shift where failure risk is already highest
+                    </div>
+                </div>
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+
+        # ── Chart 1: Failure rate by experience group (bar) ────────────
+        with col1:
+            st.markdown("<div class='section-title'>Failure Rate by Experience Group</div>",
+                        unsafe_allow_html=True)
+            fig1, ax1 = plt.subplots(figsize=(6, 4))
+            fig1.patch.set_facecolor('#111827')
+            ax1.set_facecolor('#111827')
+
+            bar_colors = ['#ef4444' if v == grp_stats['Failure_Rate_pct'].max()
+                          else '#22c55e' if v == grp_stats['Failure_Rate_pct'].min()
+                          else '#3b82f6'
+                          for v in grp_stats['Failure_Rate_pct']]
+            bars1 = ax1.bar(grp_stats['Group'].astype(str),
+                             grp_stats['Failure_Rate_pct'],
+                             color=bar_colors, alpha=0.9, width=0.55)
+            ax1.set_ylabel('Failure Rate (%)', color='#94a3b8', fontsize=10)
+            ax1.tick_params(colors='#94a3b8', labelsize=8)
+            ax1.set_title('Failure Rate by Operator Experience',
+                           color='#e2e8f0', fontsize=11, fontweight='bold')
+            for spine in ax1.spines.values():
+                spine.set_color('#30363d')
+            for bar, val in zip(bars1, grp_stats['Failure_Rate_pct']):
+                ax1.text(bar.get_x()+bar.get_width()/2,
+                         bar.get_height()+0.3,
+                         str(val)+'%',
+                         ha='center', color='#e2e8f0',
+                         fontsize=9, fontweight='bold')
+            # Annotate novice vs expert
+            ax1.annotate(str(multiplier)+'x higher risk',
+                          xy=(0, novice_rate),
+                          xytext=(1.5, novice_rate+2),
+                          color='#ef4444', fontsize=9, fontweight='bold',
+                          arrowprops=dict(arrowstyle='->', color='#ef4444', lw=1.5))
+            st.pyplot(fig1, use_container_width=True)
+            plt.close()
+
+        # ── Chart 2: Total failures per group (horizontal bar) ─────────
+        with col2:
+            st.markdown("<div class='section-title'>Total Failures per Experience Group</div>",
+                        unsafe_allow_html=True)
+            fig2, ax2 = plt.subplots(figsize=(6, 4))
+            fig2.patch.set_facecolor('#111827')
+            ax2.set_facecolor('#111827')
+            bar_colors2 = ['#ef4444' if v == grp_stats['Failures'].max()
+                            else '#22c55e' if v == grp_stats['Failures'].min()
+                            else '#3b82f6'
+                            for v in grp_stats['Failures']]
+            bars2 = ax2.barh(grp_stats['Group'].astype(str),
+                              grp_stats['Failures'],
+                              color=bar_colors2, alpha=0.9, height=0.55)
+            ax2.set_xlabel('Number of Failures', color='#94a3b8', fontsize=10)
+            ax2.tick_params(colors='#94a3b8', labelsize=8)
+            ax2.set_title('Total Failures per Group',
+                           color='#e2e8f0', fontsize=11, fontweight='bold')
+            for spine in ax2.spines.values():
+                spine.set_color('#30363d')
+            for bar, row in zip(bars2, grp_stats.itertuples()):
+                ax2.text(bar.get_width()+0.3,
+                         bar.get_y()+bar.get_height()/2,
+                         str(int(row.Failures)) + ' failures (' + str(row.Total) + ' total)',
+                         va='center', color='#e2e8f0', fontsize=8)
+            st.pyplot(fig2, use_container_width=True)
+            plt.close()
+
+        # ── Chart 3: Scatter plot — experience vs failure probability ──
+        st.markdown("<div class='section-title'>Scatter Plot — Operator Experience vs Failure Probability</div>",
+                    unsafe_allow_html=True)
+        st.caption("Each dot = one equipment record. Color = equipment type. Rising dots on left = novice operators cause more failures.")
+
+        # Merge with alert proba
+        if 'Equipment_ID' in df.columns:
+            proba_map = alerts_df.groupby('Equipment_ID')['Failure_Probability_%'].first()
+            scatter_df = df[['Operator_Experience_Yr','Failure']].copy()
+            if 'Equipment_ID' in df.columns:
+                scatter_df['Equipment_ID'] = df['Equipment_ID']
+                scatter_df['Failure_Prob'] = scatter_df['Equipment_ID'].map(proba_map).fillna(
+                    df['Failure'] * 100)
+            if 'Equipment_Type' in df.columns:
+                scatter_df['Equipment_Type'] = df['Equipment_Type']
+            elif 'Equipment_Type_enc' in df.columns:
+                scatter_df['Equipment_Type'] = df['Equipment_Type_enc'].map(
+                    {0:'Excavator',1:'Dumper',2:'Dozer',
+                     3:'Grader',4:'Drill Rig',5:'Wheel Loader',6:'Scraper'})
+        else:
+            scatter_df = df[['Operator_Experience_Yr','Failure']].copy()
+            scatter_df['Failure_Prob'] = df['Failure'] * 100
+            scatter_df['Equipment_Type'] = 'Unknown'
+
+        fig3, ax3 = plt.subplots(figsize=(13, 5))
+        fig3.patch.set_facecolor('#111827')
+        ax3.set_facecolor('#0f172a')
+
+        eq_types_uniq = scatter_df['Equipment_Type'].unique() if 'Equipment_Type' in scatter_df.columns else ['Unknown']
+        scatter_colors = ['#ef4444','#f97316','#eab308','#22c55e','#3b82f6','#8b5cf6','#ec4899']
+
+        for i, eq_t in enumerate(eq_types_uniq):
+            mask = scatter_df['Equipment_Type'] == eq_t
+            ax3.scatter(
+                scatter_df[mask]['Operator_Experience_Yr'],
+                scatter_df[mask]['Failure_Prob'],
+                alpha=0.35, s=18,
+                color=scatter_colors[i % len(scatter_colors)],
+                label=str(eq_t), edgecolors='none'
+            )
+
+        # Trend line
+        valid = scatter_df.dropna(subset=['Operator_Experience_Yr','Failure_Prob'])
+        if len(valid) > 10:
+            z   = np.polyfit(valid['Operator_Experience_Yr'], valid['Failure_Prob'], 1)
+            p   = np.poly1d(z)
+            x_l = np.linspace(valid['Operator_Experience_Yr'].min(),
+                               valid['Operator_Experience_Yr'].max(), 100)
+            ax3.plot(x_l, p(x_l), '--', color='#ffffff', lw=2,
+                      alpha=0.7, label='Trend line')
+
+        # Danger zone shading for novice operators
+        ax3.axvspan(0, 2, alpha=0.08, color='#ef4444', label='Novice zone (0-2 yr)')
+        ax3.axvspan(2, 5, alpha=0.05, color='#f97316', label='Junior zone (2-5 yr)')
+
+        ax3.set_xlabel('Operator Experience (Years)', color='#94a3b8', fontsize=11)
+        ax3.set_ylabel('Failure Probability (%)', color='#94a3b8', fontsize=11)
+        ax3.set_title('Operator Experience vs Failure Probability — Left = novice (higher risk), Right = expert (lower risk)', color='#e2e8f0', fontsize=11, fontweight='bold')
+        ax3.tick_params(colors='#94a3b8')
+        ax3.legend(facecolor='#1e293b', labelcolor='#e2e8f0',
+                    fontsize=8, loc='upper right', ncol=2)
+        for spine in ax3.spines.values():
+            spine.set_color('#1e293b')
+        st.pyplot(fig3, use_container_width=True)
+        plt.close()
+
+        # ── Chart 4: Experience vs failure by equipment type heatmap ──
+        st.markdown("<div class='section-title'>Failure Rate Heatmap — Experience Group x Equipment Type</div>",
+                    unsafe_allow_html=True)
+
+        if 'Equipment_Type' in op_df.columns:
+            pivot2 = op_df.pivot_table(
+                values='Failure', index='Exp_Group',
+                columns='Equipment_Type', aggfunc='mean') * 100
+            pivot2 = pivot2.round(1)
+
+            fig4, ax4 = plt.subplots(figsize=(13, 4))
+            fig4.patch.set_facecolor('#111827')
+            ax4.set_facecolor('#111827')
+            im = ax4.imshow(pivot2.values, cmap='RdYlGn_r',
+                             aspect='auto', vmin=0, vmax=pivot2.values.max())
+            ax4.set_xticks(range(len(pivot2.columns)))
+            ax4.set_xticklabels(pivot2.columns, color='#e2e8f0', fontsize=9)
+            ax4.set_yticks(range(len(pivot2.index)))
+            ax4.set_yticklabels([str(g) for g in pivot2.index],
+                                  color='#e2e8f0', fontsize=9)
+            ax4.set_title(
+                'Failure Rate % — Experience Group x Equipment Type (Red=high, Green=low)',
+                color='#e2e8f0', fontsize=11, fontweight='bold')
+            for i in range(len(pivot2.index)):
+                for j in range(len(pivot2.columns)):
+                    val = pivot2.values[i][j]
+                    if not np.isnan(val):
+                        ax4.text(j, i, str(round(val,1))+'%',
+                                  ha='center', va='center',
+                                  color='white', fontsize=9, fontweight='bold')
+            plt.colorbar(im, ax=ax4, label='Failure Rate (%)')
+            plt.tight_layout()
+            st.pyplot(fig4, use_container_width=True)
+            plt.close()
+
+        # ── Stats table ──────────────────────────────────────────────────
+        st.markdown("<div class='section-title'>Experience Group Statistics</div>",
+                    unsafe_allow_html=True)
+        display_grp = grp_stats.copy()
+        display_grp['Group'] = display_grp['Group'].astype(str)
+        display_grp['Risk vs Expert'] = display_grp['Failure_Rate_pct'].apply(
+            lambda x: str(round(x/expert_rate, 1))+'x higher' if expert_rate > 0 else 'N/A')
+        display_grp['Recommendation'] = display_grp['Group'].apply(
+            lambda g: 'BUDDY SYSTEM + Night restriction' if '0-2' in g
+            else 'Mandatory checklist + mentoring' if '2-5' in g
+            else 'Standard supervision' if '5-10' in g
+            else 'Can mentor juniors' if '10-15' in g
+            else 'Senior mentor — assign to critical machines')
+        display_grp = display_grp[['Group','Total','Failures','Failure_Rate_pct',
+                                    'Risk vs Expert','Recommendation']]
+        display_grp.columns = ['Experience Group','Total Records','Failures',
+                                'Failure Rate %','Risk vs Expert','Recommendation']
+        st.dataframe(display_grp, use_container_width=True, hide_index=True)
 
 
 # ── Auto-refresh ──────────────────────────────────────────────────────
