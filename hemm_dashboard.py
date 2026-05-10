@@ -11,6 +11,7 @@ Then open browser: http://localhost:8501
 """
 
 import streamlit as st
+import joblib
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -198,16 +199,26 @@ def load_and_train(data_path, mtime):
     X_tr, X_te, yc_tr, yc_te, yr_tr, yr_te, yp_tr, yp_te = train_test_split(
         X, y_class, y_reg, y_pri, test_size=0.2, random_state=42, stratify=y_class)
 
-    cw  = compute_class_weight('balanced', classes=np.array([0,1]), y=yc_tr)
-    rf  = RandomForestClassifier(n_estimators=200, max_depth=15,
-                                  class_weight={0:cw[0],1:cw[1]}, random_state=42, n_jobs=-1)
-    gb  = GradientBoostingClassifier(n_estimators=150, learning_rate=0.08,
-                                      max_depth=5, random_state=42)
-    ens = VotingClassifier(estimators=[('rf',rf),('gb',gb)], voting='soft', weights=[2,1])
-    ens.fit(X_tr, yc_tr)
+    # Load saved models if .pkl exists (instant), else train fresh
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    PKL_CLF  = os.path.join(BASE_DIR, "outputs", "model_clf.pkl")
+    PKL_REG  = os.path.join(BASE_DIR, "outputs", "model_reg.pkl")
 
-    reg = RandomForestRegressor(n_estimators=200, max_depth=15, random_state=42, n_jobs=-1)
-    reg.fit(X_tr, yr_tr)
+    if os.path.exists(PKL_CLF) and os.path.exists(PKL_REG):
+        ens       = joblib.load(PKL_CLF)
+        reg       = joblib.load(PKL_REG)
+        rf_fitted = ens.estimators_[0]   # RF inside VotingClassifier
+    else:
+        cw  = compute_class_weight('balanced', classes=np.array([0,1]), y=yc_tr)
+        rf  = RandomForestClassifier(n_estimators=200, max_depth=15,
+                                      class_weight={0:cw[0],1:cw[1]}, random_state=42, n_jobs=-1)
+        gb  = GradientBoostingClassifier(n_estimators=150, learning_rate=0.08,
+                                          max_depth=5, random_state=42)
+        ens = VotingClassifier(estimators=[('rf',rf),('gb',gb)], voting='soft', weights=[2,1])
+        ens.fit(X_tr, yc_tr)
+        reg = RandomForestRegressor(n_estimators=200, max_depth=15, random_state=42, n_jobs=-1)
+        reg.fit(X_tr, yr_tr)
+        rf_fitted = ens.estimators_[0]   # access fitted RF from inside ensemble
 
     yp  = ens.predict(X_te)
     ypr = ens.predict_proba(X_te)[:,1]
@@ -218,9 +229,8 @@ def load_and_train(data_path, mtime):
         'f1':       round(f1_score(yc_te, yp), 4),
     }
 
-    # Feature importance
-    rf.fit(X_tr, yc_tr)
-    fi = pd.Series(rf.feature_importances_, index=feat_cols).sort_values(ascending=False)
+    # Feature importance — use fitted RF sub-estimator (fixes NotFittedError)
+    fi = pd.Series(rf_fitted.feature_importances_, index=feat_cols).sort_values(ascending=False)
 
     # Run alert engine on all machines
     alert_proba = ens.predict_proba(X)[:,1]
@@ -279,7 +289,7 @@ with st.sidebar:
     eq_filter = st.multiselect("Equipment Type", eq_types, default=eq_types)
 
     st.markdown("### View")
-    page = st.radio("", ["🏠 Overview", "🚨 Alerts", "📊 ML Models", "🔧 Equipment Detail"])
+    page = st.radio("", ["🏠 Overview", "🚨 Alerts", "📊 ML Models", "🔧 Equipment Detail", "💰 Cost Savings"])
     st.markdown("---")
     st.markdown(f"<small style='color:#475569'>Last checked: {time.strftime('%H:%M:%S')}</small>",
                 unsafe_allow_html=True)
@@ -596,6 +606,252 @@ elif page == "🔧 Equipment Detail":
             for i, (s, v) in enumerate(sensor_vals.items()):
                 with cols[i]:
                     st.metric(label=s.replace('_',' '), value=f"{v:.1f}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PAGE: COST SAVINGS CALCULATOR
+# ══════════════════════════════════════════════════════════════════════
+elif page == "💰 Cost Savings":
+    st.markdown("# 💰 Cost Savings Calculator")
+    st.markdown("Estimated savings by using predictive maintenance vs reactive maintenance at NALCO")
+    st.markdown("---")
+
+    # ── Sidebar inputs for cost assumptions ───────────────────────────
+    st.sidebar.markdown("### Cost Assumptions (INR)")
+    reactive_repair   = st.sidebar.number_input("Reactive repair cost (₹)", value=250000, step=10000)
+    downtime_per_day  = st.sidebar.number_input("Downtime cost per day (₹)", value=80000,  step=5000)
+    avg_downtime_days = st.sidebar.number_input("Avg downtime days (reactive)", value=3, step=1)
+    preventive_cost   = st.sidebar.number_input("Preventive service cost (₹)", value=40000, step=5000)
+    working_days      = st.sidebar.number_input("Working days this month", value=26, step=1)
+
+    # ── Calculate from alert data ──────────────────────────────────────
+    # Machines caught early = machines with HIGH or CRITICAL alert (model warned before failure)
+    caught_early  = alerts_df[alerts_df['Alert_Level'].isin(['CRITICAL','HIGH'])]['Equipment_ID'].nunique()
+    total_eq      = alerts_df['Equipment_ID'].nunique()
+    ok_machines   = alerts_df[alerts_df['Alert_Level']=='OK']['Equipment_ID'].nunique()
+
+    # Cost calculations
+    reactive_total    = caught_early * (reactive_repair + downtime_per_day * avg_downtime_days)
+    preventive_total  = caught_early * preventive_cost
+    total_savings     = reactive_total - preventive_total
+    savings_crore     = total_savings / 10_000_000
+    savings_lakh      = total_savings / 100_000
+
+    # ROI
+    roi_pct = ((total_savings - preventive_total) / preventive_total * 100) if preventive_total > 0 else 0
+
+    # ── KPI cards ─────────────────────────────────────────────────────
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.markdown(f"""<div class='metric-card'>
+            <div class='metric-val' style='color:#ef4444'>₹{reactive_total/100000:.1f}L</div>
+            <div class='metric-label'>Reactive cost (if no ML)</div>
+        </div>""", unsafe_allow_html=True)
+    with k2:
+        st.markdown(f"""<div class='metric-card'>
+            <div class='metric-val' style='color:#3b82f6'>₹{preventive_total/100000:.1f}L</div>
+            <div class='metric-label'>Predictive cost (with ML)</div>
+        </div>""", unsafe_allow_html=True)
+    with k3:
+        st.markdown(f"""<div class='metric-card'>
+            <div class='metric-val' style='color:#22c55e'>₹{savings_lakh:.1f}L</div>
+            <div class='metric-label'>Estimated savings</div>
+        </div>""", unsafe_allow_html=True)
+    with k4:
+        st.markdown(f"""<div class='metric-card'>
+            <div class='metric-val' style='color:#f97316'>{roi_pct:.0f}%</div>
+            <div class='metric-label'>Return on investment</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Big savings banner ─────────────────────────────────────────────
+    if savings_crore >= 1:
+        banner_val = f"₹{savings_crore:.2f} Crore"
+    else:
+        banner_val = f"₹{savings_lakh:.1f} Lakh"
+
+    st.markdown(f"""
+    <div style='background:linear-gradient(135deg,#0f2d1a,#1a3d2b);border:2px solid #22c55e;
+                border-radius:16px;padding:28px;text-align:center;margin:12px 0'>
+        <div style='font-size:13px;color:#4ade80;letter-spacing:.15em;text-transform:uppercase;margin-bottom:8px'>
+            Estimated savings this month using predictive maintenance
+        </div>
+        <div style='font-size:3rem;font-weight:700;color:#22c55e;font-family:monospace'>
+            {banner_val}
+        </div>
+        <div style='font-size:13px;color:#86efac;margin-top:8px'>
+            {caught_early} machines caught early &nbsp;|&nbsp;
+            {total_eq} total machines &nbsp;|&nbsp;
+            ROI = {roi_pct:.0f}%
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+
+    # ── Chart 1: Reactive vs Predictive comparison bar ─────────────────
+    with col1:
+        st.markdown("<div class='section-title'>Reactive vs Predictive Cost Comparison</div>",
+                    unsafe_allow_html=True)
+        fig1, ax1 = plt.subplots(figsize=(6, 4))
+        fig1.patch.set_facecolor('#111827')
+        ax1.set_facecolor('#111827')
+
+        categories = ['Reactive\n(No ML)', 'Predictive\n(With ML)', 'Savings']
+        values     = [reactive_total/100000, preventive_total/100000, total_savings/100000]
+        colors_b   = ['#ef4444', '#3b82f6', '#22c55e']
+
+        bars = ax1.bar(categories, values, color=colors_b, alpha=0.9, width=0.5)
+        ax1.set_ylabel('Cost (₹ Lakhs)', color='#94a3b8', fontsize=10)
+        ax1.tick_params(colors='#94a3b8')
+        ax1.set_title('Cost Comparison (₹ Lakhs)', color='#e2e8f0', fontsize=11, fontweight='bold')
+        for spine in ax1.spines.values(): spine.set_color('#30363d')
+        for bar, val in zip(bars, values):
+            ax1.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.5,
+                     f'₹{val:.1f}L', ha='center', color='#e2e8f0',
+                     fontsize=10, fontweight='bold')
+        st.pyplot(fig1, use_container_width=True)
+        plt.close()
+
+    # ── Chart 2: Per equipment type savings breakdown ──────────────────
+    with col2:
+        st.markdown("<div class='section-title'>Savings Breakdown by Equipment Type</div>",
+                    unsafe_allow_html=True)
+        eq_caught = (alerts_df[alerts_df['Alert_Level'].isin(['CRITICAL','HIGH'])]
+                     .groupby('Equipment_Type')['Equipment_ID'].nunique())
+
+        eq_savings = (eq_caught * (reactive_repair + downtime_per_day * avg_downtime_days
+                                   - preventive_cost)) / 100000
+
+        fig2, ax2 = plt.subplots(figsize=(6, 4))
+        fig2.patch.set_facecolor('#111827')
+        ax2.set_facecolor('#111827')
+        eq_colors = ['#22c55e' if v > eq_savings.mean() else '#3b82f6'
+                     for v in eq_savings.values]
+        bars2 = ax2.barh(eq_savings.index, eq_savings.values,
+                          color=eq_colors, alpha=0.9, height=0.6)
+        ax2.set_xlabel('Savings (₹ Lakhs)', color='#94a3b8', fontsize=10)
+        ax2.tick_params(colors='#94a3b8', labelsize=9)
+        ax2.set_title('Savings per Equipment Type', color='#e2e8f0',
+                       fontsize=11, fontweight='bold')
+        for spine in ax2.spines.values(): spine.set_color('#30363d')
+        for bar, val in zip(bars2, eq_savings.values):
+            ax2.text(val+0.2, bar.get_y()+bar.get_height()/2,
+                     f'₹{val:.1f}L', va='center', color='#e2e8f0', fontsize=9)
+        st.pyplot(fig2, use_container_width=True)
+        plt.close()
+
+    # ── Chart 3: Monthly savings trend (simulated over 12 months) ──────
+    st.markdown("<div class='section-title'>Projected Annual Savings (12-Month Forecast)</div>",
+                unsafe_allow_html=True)
+
+    months      = ['Jan','Feb','Mar','Apr','May','Jun',
+                   'Jul','Aug','Sep','Oct','Nov','Dec']
+    # Simulate slight variation each month (+/- 10%)
+    np.random.seed(42)
+    monthly_savings = [total_savings/100000 * (1 + np.random.uniform(-0.1, 0.15))
+                       for _ in range(12)]
+    cumulative      = np.cumsum(monthly_savings)
+
+    fig3, (ax3a, ax3b) = plt.subplots(1, 2, figsize=(14, 4))
+    fig3.patch.set_facecolor('#111827')
+
+    # Monthly bar
+    ax3a.set_facecolor('#111827')
+    bar_colors = ['#22c55e' if v >= total_savings/100000 else '#3b82f6'
+                  for v in monthly_savings]
+    ax3a.bar(months, monthly_savings, color=bar_colors, alpha=0.9, width=0.6)
+    ax3a.axhline(total_savings/100000, color='#f97316', lw=1.5,
+                  linestyle='--', label=f'Baseline ₹{total_savings/100000:.1f}L')
+    ax3a.set_ylabel('Savings (₹ Lakhs)', color='#94a3b8', fontsize=9)
+    ax3a.tick_params(colors='#94a3b8', labelsize=8)
+    ax3a.set_title('Monthly Savings Forecast', color='#e2e8f0', fontsize=10, fontweight='bold')
+    ax3a.legend(facecolor='#1e293b', labelcolor='#e2e8f0', fontsize=8)
+    for spine in ax3a.spines.values(): spine.set_color('#30363d')
+
+    # Cumulative line
+    ax3b.set_facecolor('#111827')
+    ax3b.plot(months, cumulative, color='#22c55e', lw=2.5, marker='o',
+               markersize=5, markerfacecolor='#22c55e')
+    ax3b.fill_between(range(12), cumulative, alpha=0.1, color='#22c55e')
+    ax3b.set_ylabel('Cumulative Savings (₹ Lakhs)', color='#94a3b8', fontsize=9)
+    ax3b.tick_params(colors='#94a3b8', labelsize=8)
+    ax3b.set_xticks(range(12)); ax3b.set_xticklabels(months, fontsize=8, color='#94a3b8')
+    ax3b.set_title(f'Cumulative Annual Savings: ₹{cumulative[-1]/100:.2f} Crore',
+                    color='#e2e8f0', fontsize=10, fontweight='bold')
+    for spine in ax3b.spines.values(): spine.set_color('#30363d')
+
+    # Annotate final value
+    ax3b.annotate(f'₹{cumulative[-1]:.0f}L',
+                   xy=(11, cumulative[-1]),
+                   xytext=(-40, -20), textcoords='offset points',
+                   color='#22c55e', fontsize=10, fontweight='bold')
+
+    plt.tight_layout()
+    st.pyplot(fig3, use_container_width=True)
+    plt.close()
+
+    # ── Detailed breakdown table ───────────────────────────────────────
+    st.markdown("<div class='section-title'>Detailed Cost Breakdown</div>",
+                unsafe_allow_html=True)
+
+    breakdown_data = {
+        'Item': [
+            'Machines caught early by ML',
+            'Reactive repair cost per machine',
+            'Downtime cost per machine',
+            'Total reactive cost (if no ML)',
+            'Preventive service cost per machine',
+            'Total preventive cost (with ML)',
+            'NET SAVINGS',
+            'Annual projection'
+        ],
+        'Value (INR)': [
+            f"{caught_early} machines",
+            f"₹{reactive_repair:,.0f}",
+            f"₹{downtime_per_day * avg_downtime_days:,.0f} ({avg_downtime_days} days × ₹{downtime_per_day:,.0f})",
+            f"₹{reactive_total:,.0f}  (₹{reactive_total/100000:.1f} Lakhs)",
+            f"₹{preventive_cost:,.0f}",
+            f"₹{preventive_total:,.0f}  (₹{preventive_total/100000:.1f} Lakhs)",
+            f"₹{total_savings:,.0f}  (₹{savings_lakh:.1f} Lakhs = ₹{savings_crore:.2f} Crore)",
+            f"₹{total_savings*12:,.0f}  (₹{total_savings*12/10000000:.2f} Crore/year)"
+        ]
+    }
+    breakdown_df = pd.DataFrame(breakdown_data)
+    st.dataframe(breakdown_df, use_container_width=True, hide_index=True, height=320)
+
+    # ── Download button ────────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    report_text = f"""
+NALCO HEMM — COST SAVINGS REPORT
+Generated: {time.strftime('%d %b %Y %H:%M')}
+{'='*50}
+Machines analysed       : {total_eq}
+Machines caught early   : {caught_early}
+Machines safe (OK)      : {ok_machines}
+
+COST ASSUMPTIONS
+Reactive repair/machine : INR {reactive_repair:,.0f}
+Downtime cost/day       : INR {downtime_per_day:,.0f}
+Avg downtime (reactive) : {avg_downtime_days} days
+Preventive cost/machine : INR {preventive_cost:,.0f}
+
+RESULTS
+Reactive total cost     : INR {reactive_total:,.0f}
+Preventive total cost   : INR {preventive_total:,.0f}
+NET SAVINGS THIS MONTH  : INR {total_savings:,.0f} (INR {savings_lakh:.1f} Lakhs)
+ANNUAL PROJECTION       : INR {total_savings*12:,.0f} (INR {total_savings*12/10000000:.2f} Crore)
+ROI                     : {roi_pct:.0f}%
+{'='*50}
+"""
+    st.download_button(
+        label="⬇️ Download Cost Savings Report (TXT)",
+        data=report_text,
+        file_name="nalco_hemm_cost_savings.txt",
+        mime="text/plain"
+    )
+
 
 # ── Auto-refresh ──────────────────────────────────────────────────────
 if auto_refresh:
