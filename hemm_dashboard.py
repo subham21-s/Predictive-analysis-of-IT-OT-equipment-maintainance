@@ -289,7 +289,7 @@ with st.sidebar:
     eq_filter = st.multiselect("Equipment Type", eq_types, default=eq_types)
 
     st.markdown("### View")
-    page = st.radio("", ["🏠 Overview", "🚨 Alerts", "📊 ML Models", "🔧 Equipment Detail", "💰 Cost Savings"])
+    page = st.radio("", ["🏠 Overview", "🚨 Alerts", "📊 ML Models", "🔧 Equipment Detail", "💰 Cost Savings", "🔀 Shift Analysis"])
     st.markdown("---")
     st.markdown(f"<small style='color:#475569'>Last checked: {time.strftime('%H:%M:%S')}</small>",
                 unsafe_allow_html=True)
@@ -400,6 +400,64 @@ if page == "🏠 Overview":
         ax3.text(i, v+0.3, str(v), ha='center', color='#e2e8f0', fontsize=9, fontweight='bold')
     st.pyplot(fig3, use_container_width=True)
     plt.close()
+
+    # ── Shift-wise failure snapshot (overview teaser) ──────────────────
+    if 'Shift' in df.columns or 'Shift_enc' in df.columns:
+        st.markdown("<div class='section-title'>Shift-wise Failure Overview</div>", unsafe_allow_html=True)
+
+        SHIFT_MAP = {0: 'Day', 1: 'Afternoon', 2: 'Night'}
+        shift_col = 'Shift' if 'Shift' in df.columns else 'Shift_enc'
+        df_s = df.copy()
+        if shift_col == 'Shift_enc':
+            df_s['Shift_Name'] = df_s['Shift_enc'].map(SHIFT_MAP).fillna('Unknown')
+        else:
+            df_s['Shift_Name'] = df_s['Shift']
+
+        shift_fail  = df_s.groupby('Shift_Name')['Failure'].agg(['sum','count','mean']).reset_index()
+        shift_fail.columns = ['Shift','Failures','Total','Rate']
+        shift_fail['Rate_pct'] = (shift_fail['Rate'] * 100).round(1)
+        shift_fail = shift_fail.sort_values('Rate_pct', ascending=False)
+
+        worst_shift = shift_fail.iloc[0]['Shift']
+        worst_rate  = shift_fail.iloc[0]['Rate_pct']
+        total_crit  = len(alerts_df[alerts_df['Issue_Severity']=='CRITICAL'])
+
+        # Banner
+        st.markdown(f"""
+        <div style='background:linear-gradient(135deg,#2d1515,#3d1a1a);border:1px solid #ef4444;
+                    border-radius:12px;padding:16px 20px;margin:8px 0;display:flex;
+                    align-items:center;justify-content:space-between'>
+            <div>
+                <div style='font-size:12px;color:#fca5a5;letter-spacing:.1em;
+                            text-transform:uppercase;margin-bottom:4px'>Highest failure shift</div>
+                <div style='font-size:1.6rem;font-weight:700;color:#ef4444'>{worst_shift} Shift</div>
+                <div style='font-size:12px;color:#fca5a5;margin-top:2px'>
+                    Failure rate: {worst_rate}% — Recommend extra pre-shift inspection</div>
+            </div>
+            <div style='text-align:right'>
+                <div style='font-size:12px;color:#94a3b8'>Tip: See full analysis in</div>
+                <div style='font-size:13px;color:#3b82f6;font-weight:500'>🔀 Shift Analysis page</div>
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        # Mini bar chart
+        fig_s, ax_s = plt.subplots(figsize=(12, 2.5))
+        fig_s.patch.set_facecolor('#111827')
+        ax_s.set_facecolor('#111827')
+        s_colors = ['#ef4444' if s == worst_shift else '#3b82f6'
+                    for s in shift_fail['Shift']]
+        bars_s = ax_s.bar(shift_fail['Shift'], shift_fail['Rate_pct'],
+                           color=s_colors, alpha=0.9, width=0.4)
+        ax_s.set_ylabel('Failure Rate (%)', color='#94a3b8', fontsize=9)
+        ax_s.tick_params(colors='#94a3b8', labelsize=9)
+        for spine in ax_s.spines.values(): spine.set_color('#1e293b')
+        for bar, row in zip(bars_s, shift_fail.itertuples()):
+            ax_s.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.2,
+                      str(row.Rate_pct) + '%\n(' + str(int(row.Failures)) + ' failures)',
+                      ha='center', color='#e2e8f0', fontsize=9, fontweight='bold')
+        ax_s.set_title('Failure Rate by Shift', color='#e2e8f0', fontsize=10, fontweight='bold')
+        st.pyplot(fig_s, use_container_width=True)
+        plt.close()
 
 # ══════════════════════════════════════════════════════════════════════
 # PAGE: ALERTS
@@ -851,6 +909,252 @@ ROI                     : {roi_pct:.0f}%
         file_name="nalco_hemm_cost_savings.txt",
         mime="text/plain"
     )
+
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PAGE: SHIFT ANALYSIS
+# ══════════════════════════════════════════════════════════════════════
+elif page == "🔀 Shift Analysis":
+    st.markdown("# 🔀 Shift-wise Failure Analysis")
+    st.markdown("NALCO operates in 3 shifts — Day, Afternoon, Night. This page shows which shift has the most failures and what to do about it.")
+    st.markdown("---")
+
+    SHIFT_MAP = {0: 'Day', 1: 'Afternoon', 2: 'Night'}
+    shift_col = 'Shift' if 'Shift' in df.columns else 'Shift_enc'
+
+    if shift_col not in df.columns:
+        st.warning("Shift column not found in dataset.")
+    else:
+        df_s = df.copy()
+        if shift_col == 'Shift_enc':
+            df_s['Shift_Name'] = df_s['Shift_enc'].map(SHIFT_MAP).fillna('Unknown')
+        else:
+            df_s['Shift_Name'] = df_s['Shift']
+
+        # ── KPI row ───────────────────────────────────────────────────
+        shift_stats = df_s.groupby('Shift_Name')['Failure'].agg(
+            Failures='sum', Total='count', Rate='mean').reset_index()
+        shift_stats['Rate_pct'] = (shift_stats['Rate'] * 100).round(1)
+        shift_stats = shift_stats.sort_values('Rate_pct', ascending=False).reset_index(drop=True)
+
+        worst_shift  = shift_stats.iloc[0]['Shift_Name']
+        worst_rate   = shift_stats.iloc[0]['Rate_pct']
+        best_shift   = shift_stats.iloc[-1]['Shift_Name']
+        best_rate    = shift_stats.iloc[-1]['Rate_pct']
+        diff_pct     = round(worst_rate - best_rate, 1)
+
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            st.markdown(f"""<div class='metric-card'>
+                <div class='metric-val' style='color:#ef4444'>{worst_shift}</div>
+                <div class='metric-label'>Highest failure shift</div>
+            </div>""", unsafe_allow_html=True)
+        with k2:
+            st.markdown(f"""<div class='metric-card'>
+                <div class='metric-val' style='color:#ef4444'>{worst_rate}%</div>
+                <div class='metric-label'>Failure rate ({worst_shift})</div>
+            </div>""", unsafe_allow_html=True)
+        with k3:
+            st.markdown(f"""<div class='metric-card'>
+                <div class='metric-val' style='color:#22c55e'>{best_shift}</div>
+                <div class='metric-label'>Safest shift</div>
+            </div>""", unsafe_allow_html=True)
+        with k4:
+            st.markdown(f"""<div class='metric-card'>
+                <div class='metric-val' style='color:#f97316'>+{diff_pct}%</div>
+                <div class='metric-label'>{worst_shift} vs {best_shift} gap</div>
+            </div>""", unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Recommendation banner ─────────────────────────────────────
+        st.markdown(f"""
+        <div style='background:linear-gradient(135deg,#1a1a2e,#16213e);border:1px solid #3b82f6;
+                    border-radius:12px;padding:18px 22px;margin:8px 0'>
+            <div style='font-size:13px;font-weight:600;color:#93c5fd;margin-bottom:10px'>
+                NALCO RECOMMENDATION — Based on shift analysis
+            </div>
+            <div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px'>
+                <div style='background:#0f172a;border-radius:8px;padding:12px'>
+                    <div style='font-size:11px;color:#64748b;margin-bottom:4px'>ACTION 1</div>
+                    <div style='font-size:12px;color:#e2e8f0'>Schedule <b>extra pre-shift inspection</b>
+                    for <b style="color:#ef4444">{worst_shift} shift</b> equipment before every shift starts</div>
+                </div>
+                <div style='background:#0f172a;border-radius:8px;padding:12px'>
+                    <div style='font-size:11px;color:#64748b;margin-bottom:4px'>ACTION 2</div>
+                    <div style='font-size:12px;color:#e2e8f0'>Pair <b>experienced operators</b> with
+                    new operators during <b style="color:#ef4444">{worst_shift} shift</b> to reduce human error</div>
+                </div>
+                <div style='background:#0f172a;border-radius:8px;padding:12px'>
+                    <div style='font-size:11px;color:#64748b;margin-bottom:4px'>ACTION 3</div>
+                    <div style='font-size:12px;color:#e2e8f0'>Study <b>{best_shift} shift</b> practices
+                    and replicate across all shifts — {best_rate}% failure rate is the benchmark</div>
+                </div>
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+
+        # ── Chart 1: Failure rate per shift (bar) ─────────────────────
+        with col1:
+            st.markdown("<div class='section-title'>Failure Rate by Shift</div>",
+                        unsafe_allow_html=True)
+            fig1, ax1 = plt.subplots(figsize=(6, 4))
+            fig1.patch.set_facecolor('#111827')
+            ax1.set_facecolor('#111827')
+            s_colors = ['#ef4444' if s == worst_shift else
+                        '#22c55e' if s == best_shift else '#3b82f6'
+                        for s in shift_stats['Shift_Name']]
+            bars1 = ax1.bar(shift_stats['Shift_Name'], shift_stats['Rate_pct'],
+                             color=s_colors, alpha=0.9, width=0.45)
+            ax1.set_ylabel('Failure Rate (%)', color='#94a3b8', fontsize=10)
+            ax1.tick_params(colors='#94a3b8', labelsize=10)
+            ax1.set_title('Failure Rate by Shift', color='#e2e8f0',
+                           fontsize=11, fontweight='bold')
+            for spine in ax1.spines.values(): spine.set_color('#30363d')
+            for bar, row in zip(bars1, shift_stats.itertuples()):
+                ax1.text(bar.get_x()+bar.get_width()/2,
+                         bar.get_height()+0.2,
+                         str(row.Rate_pct) + '%\n(' + str(int(row.Failures)) + ' failures)',
+                         ha='center', color='#e2e8f0',
+                         fontsize=9, fontweight='bold')
+            st.pyplot(fig1, use_container_width=True)
+            plt.close()
+
+        # ── Chart 2: Total failures per shift (donut) ─────────────────
+        with col2:
+            st.markdown("<div class='section-title'>Failure Share by Shift</div>",
+                        unsafe_allow_html=True)
+            fig2, ax2 = plt.subplots(figsize=(6, 4))
+            fig2.patch.set_facecolor('#111827')
+            ax2.set_facecolor('#111827')
+            s_colors2 = ['#ef4444', '#f97316', '#22c55e']
+            wedges, texts, autotexts = ax2.pie(
+                shift_stats['Failures'],
+                labels=shift_stats['Shift_Name'],
+                colors=s_colors2[:len(shift_stats)],
+                autopct='%1.1f%%', startangle=90,
+                wedgeprops=dict(width=0.6),
+                textprops={'color':'#94a3b8','fontsize':10})
+            for at in autotexts:
+                at.set_color('#0f172a'); at.set_fontweight('bold'); at.set_fontsize(9)
+            ax2.set_title('Share of Total Failures by Shift',
+                           color='#e2e8f0', fontsize=11, fontweight='bold')
+            st.pyplot(fig2, use_container_width=True)
+            plt.close()
+
+        # ── Chart 3: Heatmap — Shift × Equipment Type ─────────────────
+        st.markdown("<div class='section-title'>Failure Heatmap — Shift × Equipment Type</div>",
+                    unsafe_allow_html=True)
+
+        if 'Equipment_Type' in df_s.columns:
+            eq_col = 'Equipment_Type'
+        elif 'Equipment_Type_enc' in df_s.columns:
+            df_s['Equipment_Type'] = df_s['Equipment_Type_enc'].map(
+                {0:'Excavator',1:'Dumper',2:'Dozer',
+                 3:'Grader',4:'Drill Rig',5:'Wheel Loader',6:'Scraper'})
+            eq_col = 'Equipment_Type'
+        else:
+            eq_col = None
+
+        if eq_col:
+            pivot = df_s.pivot_table(values='Failure', index='Shift_Name',
+                                      columns=eq_col, aggfunc='mean') * 100
+            pivot = pivot.round(1)
+
+            fig3, ax3 = plt.subplots(figsize=(13, 4))
+            fig3.patch.set_facecolor('#111827')
+            ax3.set_facecolor('#111827')
+            im = ax3.imshow(pivot.values, cmap='RdYlGn_r', aspect='auto',
+                             vmin=0, vmax=pivot.values.max())
+            ax3.set_xticks(range(len(pivot.columns)))
+            ax3.set_xticklabels(pivot.columns, color='#e2e8f0', fontsize=10)
+            ax3.set_yticks(range(len(pivot.index)))
+            ax3.set_yticklabels(pivot.index, color='#e2e8f0', fontsize=10)
+            ax3.set_title('Failure Rate % by Shift x Equipment Type (Red=high risk, Green=low risk)',
+                           color='#e2e8f0', fontsize=11, fontweight='bold')
+            # Add value labels inside cells
+            for i in range(len(pivot.index)):
+                for j in range(len(pivot.columns)):
+                    val = pivot.values[i][j]
+                    if not np.isnan(val):
+                        ax3.text(j, i, f'{val:.1f}%', ha='center', va='center',
+                                  color='white', fontsize=9, fontweight='bold')
+            plt.colorbar(im, ax=ax3, label='Failure Rate (%)')
+            plt.tight_layout()
+            st.pyplot(fig3, use_container_width=True)
+            plt.close()
+
+        # ── Chart 4: Failures by shift + time of day bar ──────────────
+        st.markdown("<div class='section-title'>Failure Count & Average Probability by Shift</div>",
+                    unsafe_allow_html=True)
+
+        fig4, (ax4a, ax4b) = plt.subplots(1, 2, figsize=(14, 4))
+        fig4.patch.set_facecolor('#111827')
+
+        # Left: failure count bars
+        ax4a.set_facecolor('#111827')
+        b_colors = ['#ef4444' if s == worst_shift else
+                    '#22c55e' if s == best_shift else '#3b82f6'
+                    for s in shift_stats['Shift_Name']]
+        bars4 = ax4a.bar(shift_stats['Shift_Name'], shift_stats['Failures'],
+                          color=b_colors, alpha=0.9, width=0.5)
+        ax4a.set_ylabel('Total Failures', color='#94a3b8', fontsize=9)
+        ax4a.tick_params(colors='#94a3b8')
+        ax4a.set_title('Total Failures per Shift', color='#e2e8f0',
+                        fontsize=10, fontweight='bold')
+        for spine in ax4a.spines.values(): spine.set_color('#30363d')
+        for bar, val in zip(bars4, shift_stats['Failures']):
+            ax4a.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.5,
+                      str(int(val)), ha='center', color='#e2e8f0',
+                      fontsize=10, fontweight='bold')
+
+        # Right: avg probability
+        ax4b.set_facecolor('#111827')
+        if 'Failure_Probability_%' in alerts_df.columns:
+            eq_ids_by_shift = {}
+            if eq_col and shift_col in df_s.columns:
+                for shift in shift_stats['Shift_Name']:
+                    ids = df_s[df_s['Shift_Name'] == shift]['Equipment_ID'].unique()                           if 'Equipment_ID' in df_s.columns else []
+                    eq_ids_by_shift[shift] = ids
+
+            shift_prob = df_s.groupby('Shift_Name').apply(
+                lambda g: g['Failure'].mean() * 100).reset_index()
+            shift_prob.columns = ['Shift_Name', 'Avg_Fail_Rate']
+
+            p_colors = ['#ef4444' if s == worst_shift else
+                        '#22c55e' if s == best_shift else '#3b82f6'
+                        for s in shift_prob['Shift_Name']]
+            bars_p = ax4b.bar(shift_prob['Shift_Name'], shift_prob['Avg_Fail_Rate'],
+                               color=p_colors, alpha=0.9, width=0.5)
+            ax4b.set_ylabel('Avg Failure Rate (%)', color='#94a3b8', fontsize=9)
+            ax4b.tick_params(colors='#94a3b8')
+            ax4b.set_title('Average Failure Rate per Shift',
+                            color='#e2e8f0', fontsize=10, fontweight='bold')
+            for spine in ax4b.spines.values(): spine.set_color('#30363d')
+            for bar, val in zip(bars_p, shift_prob['Avg_Fail_Rate']):
+                ax4b.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.2,
+                          f'{val:.1f}%', ha='center', color='#e2e8f0',
+                          fontsize=10, fontweight='bold')
+
+        plt.tight_layout()
+        st.pyplot(fig4, use_container_width=True)
+        plt.close()
+
+        # ── Detailed stats table ───────────────────────────────────────
+        st.markdown("<div class='section-title'>Shift Statistics Table</div>",
+                    unsafe_allow_html=True)
+        display_stats = shift_stats.copy()
+        display_stats['Failure Rate'] = display_stats['Rate_pct'].apply(lambda x: f"{x}%")
+        display_stats['Status'] = display_stats['Shift_Name'].apply(
+            lambda s: "⚠ HIGHEST RISK — Extra inspection needed" if s == worst_shift else
+                      "✅ SAFEST — Use as benchmark" if s == best_shift else
+                      "🔵 MODERATE")
+        display_stats = display_stats[['Shift_Name','Failures','Total','Failure Rate','Status']]
+        display_stats.columns = ['Shift','Failures','Total Machines','Failure Rate','Recommendation']
+        st.dataframe(display_stats, use_container_width=True, hide_index=True)
 
 
 # ── Auto-refresh ──────────────────────────────────────────────────────
