@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║     NALCO HEMM PREDICTIVE MAINTENANCE — COMPLETE SYSTEM v3.0        ║
+║     NALCO HEMM PREDICTIVE MAINTENANCE — COMPLETE SYSTEM v2.0        ║
 ║     ONE FILE — ONE CLICK — FULL OUTPUT                               ║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║  WHAT THIS FILE DOES (all in one run):                               ║
@@ -16,7 +16,6 @@
 ║           • Does it need REPLACEMENT or INSPECTION?                  ║
 ║           • How critical is it? (CRITICAL / HIGH / MEDIUM / OK)      ║
 ║           • What exact action to take?                               ║
-║  STEP 3b— Save trained models to .pkl files (skip retraining next)   ║
 ║  STEP 5 — Save all outputs to outputs\ folder                        ║
 ║                                                                      ║
 ║  HOW TO RUN:                                                         ║
@@ -35,8 +34,6 @@
 # IMPORTS
 # ══════════════════════════════════════════════════════════════════════
 import os
-import sqlite3
-import joblib
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -161,158 +158,87 @@ print(f"   ✔ Failure rate: {y_class.mean()*100:.1f}%  ({y_class.sum()} failure
 print(f"   ✔ Train: {len(X_tr)}  |  Test: {len(X_te)}")
 
 # ══════════════════════════════════════════════════════════════════════
-# STEP 3 — TRAIN OR LOAD ML MODELS
-# Smart: loads saved .pkl if found, trains fresh only on first run
-# To force retrain: delete the .pkl files from outputs/ folder
+# STEP 3 — TRAIN ML MODELS
 # ══════════════════════════════════════════════════════════════════════
-PKL_CLF      = os.path.join(OUT, "model_clf.pkl")
-PKL_REG      = os.path.join(OUT, "model_reg.pkl")
-PKL_PRI      = os.path.join(OUT, "model_pri.pkl")
-PKL_FEATURES = os.path.join(OUT, "model_features.pkl")
+print("\n[STEP 3] Training ML models...")
 
-models_exist = all(os.path.exists(p) for p in [PKL_CLF, PKL_REG, PKL_PRI, PKL_FEATURES])
+# ── Model A: Failure Classification ───────────────────────────────────
+print("   Training Model A — Failure Classification...")
+cw      = compute_class_weight('balanced', classes=np.array([0,1]), y=yc_tr)
+cw_dict = {0: cw[0], 1: cw[1]}
 
-if models_exist:
-    # ── FAST PATH: Load saved models (under 1 second) ─────────────────
-    print("\n[STEP 3] Loading saved models from outputs/ ...")
-    print("   (Skipping retraining — delete .pkl files to force retrain)")
-    ensemble_clf = joblib.load(PKL_CLF)
-    rf_reg       = joblib.load(PKL_REG)
-    rf_pri       = joblib.load(PKL_PRI)
-    FEATURE_COLS = joblib.load(PKL_FEATURES)
+rf_clf = RandomForestClassifier(
+    n_estimators=300, max_depth=15, min_samples_split=4,
+    min_samples_leaf=2, class_weight=cw_dict, random_state=42, n_jobs=-1)
 
-    best_reg_name = "Random Forest"
+gb_clf = GradientBoostingClassifier(
+    n_estimators=200, learning_rate=0.08, max_depth=6,
+    subsample=0.8, min_samples_leaf=2, random_state=42)
 
-    print("   Running quick evaluation on test set...")
-    yp_ens      = ensemble_clf.predict(X_te)
-    ypr_ens     = ensemble_clf.predict_proba(X_te)[:, 1]
-    yp_reg_te   = rf_reg.predict(X_te)
-    yp_pri_pred = rf_pri.predict(X_te)
+ensemble_clf = VotingClassifier(
+    estimators=[('rf', rf_clf), ('gb', gb_clf)],
+    voting='soft', weights=[2, 1])
 
-    _s = {
-        'acc':       accuracy_score(yc_te, yp_ens),
-        'precision': precision_score(yc_te, yp_ens),
-        'recall':    recall_score(yc_te, yp_ens),
-        'f1':        f1_score(yc_te, yp_ens),
-        'auc':       roc_auc_score(yc_te, ypr_ens),
-        'cv_auc':    np.array([roc_auc_score(yc_te, ypr_ens)]),
-        'cm':        confusion_matrix(yc_te, yp_ens),
-        'proba':     ypr_ens,
-        'report':    classification_report(yc_te, yp_ens)
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+results_clf = {}
+for name, model in [("Random Forest", rf_clf),
+                    ("Gradient Boosting", gb_clf),
+                    ("Ensemble", ensemble_clf)]:
+    cv_scores = cross_val_score(model, X_tr, yc_tr, cv=cv, scoring='roc_auc')
+    model.fit(X_tr, yc_tr)
+    yp  = model.predict(X_te)
+    ypr = model.predict_proba(X_te)[:, 1]
+    results_clf[name] = {
+        'acc':       accuracy_score(yc_te, yp),
+        'precision': precision_score(yc_te, yp),
+        'recall':    recall_score(yc_te, yp),
+        'f1':        f1_score(yc_te, yp),
+        'auc':       roc_auc_score(yc_te, ypr),
+        'cv_auc':    cv_scores,
+        'cm':        confusion_matrix(yc_te, yp),
+        'proba':     ypr,
+        'report':    classification_report(yc_te, yp)
     }
-    results_clf = {"Ensemble": _s, "Random Forest": _s, "Gradient Boosting": _s}
+    print(f"      [{name}]  AUC={results_clf[name]['auc']:.4f}  "
+          f"Recall={results_clf[name]['recall']:.4f}  "
+          f"F1={results_clf[name]['f1']:.4f}")
 
-    results_reg = {"Random Forest": {
-        'mae':  mean_absolute_error(yr_te, yp_reg_te),
-        'rmse': np.sqrt(mean_squared_error(yr_te, yp_reg_te)),
-        'r2':   r2_score(yr_te, yp_reg_te),
-        'pred': yp_reg_te
-    }}
-    results_reg["Gradient Boosting"] = results_reg["Random Forest"]
-    best_reg_pred = yp_reg_te
+# ── Model B: Days-to-Failure Regression ───────────────────────────────
+print("   Training Model B — Days-to-Failure Regression...")
+rf_reg = RandomForestRegressor(n_estimators=300, max_depth=15, random_state=42, n_jobs=-1)
+gb_reg = GradientBoostingRegressor(n_estimators=200, learning_rate=0.08,
+                                    max_depth=5, subsample=0.8, random_state=42)
+results_reg = {}
+for name, model in [("Random Forest", rf_reg), ("Gradient Boosting", gb_reg)]:
+    model.fit(X_tr, yr_tr)
+    yp = model.predict(X_te)
+    results_reg[name] = {
+        'mae':  mean_absolute_error(yr_te, yp),
+        'rmse': np.sqrt(mean_squared_error(yr_te, yp)),
+        'r2':   r2_score(yr_te, yp),
+        'pred': yp
+    }
+    print(f"      [{name}]  R²={results_reg[name]['r2']:.4f}  "
+          f"MAE={results_reg[name]['mae']:.1f} days")
 
-    pri_acc = accuracy_score(yp_te, yp_pri_pred)
-    pri_f1  = f1_score(yp_te, yp_pri_pred, average='weighted')
+best_reg_name = max(results_reg, key=lambda n: results_reg[n]['r2'])
+best_reg_pred = results_reg[best_reg_name]['pred']
 
-    fi    = pd.Series(ensemble_clf.estimators_[0].feature_importances_,
-                      index=FEATURE_COLS).sort_values(ascending=False)
-    top20 = fi.head(20)
+# ── Model C: Maintenance Priority ─────────────────────────────────────
+print("   Training Model C — Maintenance Priority...")
+rf_pri = RandomForestClassifier(n_estimators=300, max_depth=15,
+                                 class_weight='balanced', random_state=42, n_jobs=-1)
+rf_pri.fit(X_tr, yp_tr)
+yp_pri_pred = rf_pri.predict(X_te)
+pri_acc = accuracy_score(yp_te, yp_pri_pred)
+pri_f1  = f1_score(yp_te, yp_pri_pred, average='weighted')
+print(f"      [RF Multi-class]  Accuracy={pri_acc:.4f}  F1={pri_f1:.4f}")
 
-    print(f"   ✔ Models loaded instantly!")
-    print(f"   ✔ Ensemble  AUC={_s['auc']:.4f}  Recall={_s['recall']:.4f}  F1={_s['f1']:.4f}")
-    print(f"   ✔ Regressor MAE={results_reg['Random Forest']['mae']:.1f} days  R2={results_reg['Random Forest']['r2']:.4f}")
-    print(f"   ✔ Priority  Accuracy={pri_acc:.4f}  F1={pri_f1:.4f}")
+rf_clf.fit(X_tr, yc_tr)
+fi = pd.Series(rf_clf.feature_importances_, index=FEATURE_COLS).sort_values(ascending=False)
+top20 = fi.head(20)
 
-else:
-    # ── FIRST RUN: Train models fresh then save ────────────────────────
-    print("\n[STEP 3] Training ML models (first run — will save for next time)...")
-
-    # Model A: Failure Classification
-    print("   Training Model A — Failure Classification...")
-    cw      = compute_class_weight('balanced', classes=np.array([0,1]), y=yc_tr)
-    cw_dict = {0: cw[0], 1: cw[1]}
-
-    rf_clf = RandomForestClassifier(
-        n_estimators=300, max_depth=15, min_samples_split=4,
-        min_samples_leaf=2, class_weight=cw_dict, random_state=42, n_jobs=-1)
-    gb_clf = GradientBoostingClassifier(
-        n_estimators=200, learning_rate=0.08, max_depth=6,
-        subsample=0.8, min_samples_leaf=2, random_state=42)
-    ensemble_clf = VotingClassifier(
-        estimators=[('rf', rf_clf), ('gb', gb_clf)],
-        voting='soft', weights=[2, 1])
-
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    results_clf = {}
-    for name, model in [("Random Forest", rf_clf),
-                        ("Gradient Boosting", gb_clf),
-                        ("Ensemble", ensemble_clf)]:
-        cv_scores = cross_val_score(model, X_tr, yc_tr, cv=cv, scoring='roc_auc')
-        model.fit(X_tr, yc_tr)
-        yp  = model.predict(X_te)
-        ypr = model.predict_proba(X_te)[:, 1]
-        results_clf[name] = {
-            'acc':       accuracy_score(yc_te, yp),
-            'precision': precision_score(yc_te, yp),
-            'recall':    recall_score(yc_te, yp),
-            'f1':        f1_score(yc_te, yp),
-            'auc':       roc_auc_score(yc_te, ypr),
-            'cv_auc':    cv_scores,
-            'cm':        confusion_matrix(yc_te, yp),
-            'proba':     ypr,
-            'report':    classification_report(yc_te, yp)
-        }
-        print(f"      [{name}]  AUC={results_clf[name]['auc']:.4f}  "
-              f"Recall={results_clf[name]['recall']:.4f}  "
-              f"F1={results_clf[name]['f1']:.4f}")
-
-    # Model B: Days-to-Failure Regression
-    print("   Training Model B — Days-to-Failure Regression...")
-    rf_reg = RandomForestRegressor(n_estimators=300, max_depth=15, random_state=42, n_jobs=-1)
-    gb_reg = GradientBoostingRegressor(n_estimators=200, learning_rate=0.08,
-                                        max_depth=5, subsample=0.8, random_state=42)
-    results_reg = {}
-    for name, model in [("Random Forest", rf_reg), ("Gradient Boosting", gb_reg)]:
-        model.fit(X_tr, yr_tr)
-        yp = model.predict(X_te)
-        results_reg[name] = {
-            'mae':  mean_absolute_error(yr_te, yp),
-            'rmse': np.sqrt(mean_squared_error(yr_te, yp)),
-            'r2':   r2_score(yr_te, yp),
-            'pred': yp
-        }
-        print(f"      [{name}]  R2={results_reg[name]['r2']:.4f}  "
-              f"MAE={results_reg[name]['mae']:.1f} days")
-
-    best_reg_name = max(results_reg, key=lambda n: results_reg[n]['r2'])
-    best_reg_pred = results_reg[best_reg_name]['pred']
-
-    # Model C: Maintenance Priority
-    print("   Training Model C — Maintenance Priority...")
-    rf_pri = RandomForestClassifier(n_estimators=300, max_depth=15,
-                                     class_weight='balanced', random_state=42, n_jobs=-1)
-    rf_pri.fit(X_tr, yp_tr)
-    yp_pri_pred = rf_pri.predict(X_te)
-    pri_acc = accuracy_score(yp_te, yp_pri_pred)
-    pri_f1  = f1_score(yp_te, yp_pri_pred, average='weighted')
-    print(f"      [RF Multi-class]  Accuracy={pri_acc:.4f}  F1={pri_f1:.4f}")
-
-    fi    = pd.Series(rf_clf.feature_importances_, index=FEATURE_COLS).sort_values(ascending=False)
-    top20 = fi.head(20)
-    print("   ✔ All 3 models trained successfully!")
-
-    # ── STEP 3b: Save models to .pkl ──────────────────────────────────
-    print("\n[STEP 3b] Saving models to outputs/ for fast loading next time...")
-    joblib.dump(ensemble_clf,  PKL_CLF)
-    joblib.dump(rf_reg,        PKL_REG)
-    joblib.dump(rf_pri,        PKL_PRI)
-    joblib.dump(FEATURE_COLS,  PKL_FEATURES)
-    print(f"   ✔ model_clf.pkl      — {os.path.getsize(PKL_CLF)//1024} KB")
-    print(f"   ✔ model_reg.pkl      — {os.path.getsize(PKL_REG)//1024} KB")
-    print(f"   ✔ model_pri.pkl      — {os.path.getsize(PKL_PRI)//1024} KB")
-    print(f"   ✔ model_features.pkl — saved")
-    print("   Next run will LOAD these instantly — no retraining needed!")
-    print("   To force retrain: delete the .pkl files from outputs/")
+print("   ✔ All 3 models trained successfully!")
 
 # ══════════════════════════════════════════════════════════════════════
 # STEP 4 — ML PERFORMANCE CHARTS
@@ -657,65 +583,6 @@ alerts_df = pd.DataFrame(all_alerts)
 alerts_df.to_csv(f"{OUT}/hemm_equipment_alerts.csv", index=False, encoding='utf-8')
 print(f"   ✔ hemm_equipment_alerts.csv saved  ({len(alerts_df)} alert records)")
 
-# ── STEP 5b — Save to SQLite database ─────────────────────────────────
-print("\n[STEP 5b] Saving predictions to SQLite database...")
-DB_PATH = os.path.join(OUT, "hemm_alerts.db")
-
-# Add run timestamp to every row
-RUN_TIME = pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')
-alerts_df['run_timestamp'] = RUN_TIME
-
-# Connect and save — append mode keeps full history
-conn = sqlite3.connect(DB_PATH)
-
-# Main alerts table — full history
-alerts_df.to_sql("alerts_history", conn, if_exists="append", index=False)
-
-# Summary table per run — one row per equipment per run
-summary_df = (alerts_df.groupby('Equipment_ID')
-              .agg(
-                  Equipment_Type       =('Equipment_Type', 'first'),
-                  Failure_Probability  =('Failure_Probability_%', 'first'),
-                  Days_to_Failure      =('Days_to_Failure', 'first'),
-                  Alert_Level          =('Alert_Level', 'first'),
-                  Critical_Issues      =('Issue_Severity', lambda x: (x=='CRITICAL').sum()),
-                  High_Issues          =('Issue_Severity', lambda x: (x=='HIGH').sum()),
-                  Needs_Replacement    =('Recommended_Action', lambda x: x.str.contains('REPLACE', na=False).any()),
-                  run_timestamp        =('run_timestamp', 'first')
-              ).reset_index())
-summary_df.to_sql("equipment_summary", conn, if_exists="append", index=False)
-
-# Model metrics table — track model performance over time
-metrics_df = pd.DataFrame([{
-    'run_timestamp':  RUN_TIME,
-    'model_auc':      round(results_clf['Ensemble']['auc'], 4),
-    'model_accuracy': round(results_clf['Ensemble']['acc'], 4),
-    'model_recall':   round(results_clf['Ensemble']['recall'], 4),
-    'model_f1':       round(results_clf['Ensemble']['f1'], 4),
-    'reg_r2':         round(results_reg[best_reg_name]['r2'], 4),
-    'reg_mae':        round(results_reg[best_reg_name]['mae'], 2),
-    'total_machines': alerts_df['Equipment_ID'].nunique(),
-    'critical_count': int((alerts_df['Issue_Severity']=='CRITICAL').sum()),
-    'replace_count':  int(alerts_df['Recommended_Action'].str.contains('REPLACE', na=False).sum()),
-}])
-metrics_df.to_sql("model_metrics", conn, if_exists="append", index=False)
-
-conn.close()
-
-# Show database stats
-conn2 = sqlite3.connect(DB_PATH)
-total_runs    = pd.read_sql("SELECT COUNT(DISTINCT run_timestamp) as n FROM alerts_history", conn2).iloc[0,0]
-total_records = pd.read_sql("SELECT COUNT(*) as n FROM alerts_history", conn2).iloc[0,0]
-conn2.close()
-
-print(f"   ✔ hemm_alerts.db saved")
-print(f"      Location      : {DB_PATH}")
-print(f"      Tables        : alerts_history | equipment_summary | model_metrics")
-print(f"      Total runs    : {total_runs}")
-print(f"      Total records : {total_records}")
-print(f"      Run timestamp : {RUN_TIME}")
-print(f"   (Run the script again tomorrow — history grows automatically)")
-
 # ── Print Alert Report to Terminal ────────────────────────────────────
 top_risk = (alerts_df.groupby('Equipment_ID')
             .agg(Failure_Prob   =('Failure_Probability_%', 'first'),
@@ -926,26 +793,70 @@ print("   ALL DONE! OUTPUT FILES SAVED TO: outputs\\")
 print("=" * 70)
 print(f"""
    ML PERFORMANCE OUTPUTS:
-   ├── hemm_ml_results.png       <- Model charts (AUC, ROC, Confusion Matrix)
-   └── hemm_ml_summary.txt       <- Model accuracy numbers
+   ├── hemm_ml_results.png       ← Model charts (AUC, ROC, Confusion Matrix)
+   └── hemm_ml_summary.txt       ← Model accuracy numbers
 
    PRESCRIPTIVE ALERT OUTPUTS:
-   ├── hemm_equipment_alerts.csv <- Open in Excel, filter by Alert_Level
-   ├── hemm_alert_report.txt     <- Full maintenance report
-   ├── hemm_alert_dashboard.png  <- Alert distribution + replacement chart
-   └── hemm_alerts.db            <- SQLite history (grows every run)
-
-   SQLITE DATABASE TABLES:
-   • alerts_history    -> every alert for every machine, every run
-   • equipment_summary -> one row per machine per run (for trend charts)
-   • model_metrics     -> AUC, accuracy, MAE tracked over time
-
-   HOW TO QUERY THE DATABASE:
-   python -c "import sqlite3, pandas as pd; conn=sqlite3.connect('outputs/hemm_alerts.db'); print(pd.read_sql('SELECT * FROM equipment_summary ORDER BY run_timestamp DESC LIMIT 20', conn))"
+   ├── hemm_equipment_alerts.csv ← Open in Excel — filter by Alert_Level
+   ├── hemm_alert_report.txt     ← Full maintenance report
+   └── hemm_alert_dashboard.png  ← Alert distribution + replacement chart
 
    QUICK FILTERS IN EXCEL (hemm_equipment_alerts.csv):
-   • Alert_Level = CRITICAL          -> Stop machine immediately
-   • Recommended_Action has REPLACE  -> Order spare parts now
-   • Days_to_Failure < 14            -> Urgent — less than 2 weeks
-   • Issue_Severity = HIGH           -> Schedule this week
+   • Alert_Level = CRITICAL          → Stop machine immediately
+   • Recommended_Action has REPLACE  → Order spare parts now
+   • Days_to_Failure < 14            → Urgent — less than 2 weeks
+   • Issue_Severity = HIGH           → Schedule this week
 """)
+
+# ══════════════════════════════════════════════════════════════════════
+# STEP 6 — EMAIL ALERT NOTIFICATION
+# ══════════════════════════════════════════════════════════════════════
+
+import smtplib
+from email.message import EmailMessage
+
+# EMAIL CONFIGURATION
+SENDER_EMAIL     = "lenkagudu4@gmail.com"
+APP_PASSWORD     = "murualognssxeusd"
+RECIPIENT_EMAILS = ("subhamlenka021@gmail.com",)
+print("\n[STEP 6] Sending Email Alert...")
+
+try:
+    msg = EmailMessage()
+
+    msg["Subject"] = "NALCO HEMM ALERT REPORT"
+    msg["From"] = SENDER_EMAIL
+    msg["To"] = ", ".join(RECIPIENT_EMAILS)
+
+    msg.set_content("""
+NALCO HEMM Predictive Maintenance Report Generated Successfully.
+Please check attached reports.
+""")
+
+    # Attach TXT report
+    with open(f"{OUT}/hemm_alert_report.txt", "rb") as f:
+        msg.add_attachment(
+            f.read(),
+            maintype="text",
+            subtype="plain",
+            filename="hemm_alert_report.txt"
+        )
+
+    # Attach CSV report
+    with open(f"{OUT}/hemm_equipment_alerts.csv", "rb") as f:
+        msg.add_attachment(
+            f.read(),
+            maintype="text",
+            subtype="csv",
+            filename="hemm_equipment_alerts.csv"
+        )
+
+    # SMTP
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(SENDER_EMAIL, APP_PASSWORD)
+        smtp.send_message(msg)
+
+    print("✔ Email sent successfully!")
+
+except Exception as e:
+    print(f"❌ Email sending failed: {e}")
