@@ -13,6 +13,11 @@ Then open browser: http://localhost:8501
 import streamlit as st
 import sqlite3
 import joblib
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -279,6 +284,94 @@ with st.sidebar:
     auto_refresh = st.toggle("Live Auto-refresh (30s)", value=True)
     if auto_refresh:
         st.info("🔄 Dashboard refreshes every 30s when data changes")
+
+    st.markdown("### Email Alerts")
+    with st.expander("Configure Email", expanded=False):
+        em_sender   = st.text_input("Your Gmail",        placeholder="your@gmail.com",   key="em_s")
+        em_password = st.text_input("App Password",      placeholder="16-char password",  type="password", key="em_p")
+        em_receiver = st.text_input("Send alert to",     placeholder="manager@nalco.com", key="em_r")
+        em_col1, em_col2 = st.columns(2)
+        with em_col1:
+            send_now = st.button("Send Alert Email Now", key="em_send", use_container_width=True)
+        with em_col2:
+            test_btn = st.button("Send Test Email",      key="em_test", use_container_width=True)
+
+        if send_now and em_sender and em_password and em_receiver:
+            with st.spinner("Sending email..."):
+                try:
+                    # Build quick summary email
+                    crit_n = alerts_df[alerts_df['Issue_Severity']=='CRITICAL']['Equipment_ID'].nunique()
+                    high_n = alerts_df[alerts_df['Issue_Severity']=='HIGH']['Equipment_ID'].nunique()
+                    repl_n = alerts_df[alerts_df['Recommended_Action'].str.contains('REPLACE',na=False)]['Equipment_ID'].nunique()
+                    top5   = (alerts_df.groupby('Equipment_ID')
+                              .agg(P=('Failure_Probability_%','first'),
+                                   D=('Days_to_Failure','first'),
+                                   L=('Alert_Level','first'),
+                                   T=('Equipment_Type','first'))
+                              .sort_values('P', ascending=False).head(5))
+                    rows5 = "".join([
+                        f"<tr><td style='padding:6px'>{eq}</td><td style='padding:6px'>{r.T}</td>"
+                        f"<td style='padding:6px;color:#ef4444'>{r.L}</td>"
+                        f"<td style='padding:6px;color:#f97316'>{r.P:.1f}%</td>"
+                        f"<td style='padding:6px;color:#22c55e'>{int(r.D)}d</td></tr>"
+                        for eq, r in top5.iterrows()])
+                    html_body = f"""<html><body style='font-family:Arial;background:#0a0e1a;color:#e2e8f0;padding:20px'>
+<div style='max-width:700px;margin:0 auto'>
+  <h2 style='color:#ef4444'>NALCO HEMM Alert — {time.strftime('%d %b %Y %H:%M')}</h2>
+  <div style='display:flex;gap:12px;margin:16px 0'>
+    <div style='background:#2d1515;border:1px solid #ef4444;border-radius:8px;padding:14px;flex:1;text-align:center'>
+      <div style='font-size:24px;font-weight:700;color:#ef4444'>{crit_n}</div>
+      <div style='font-size:11px;color:#fca5a5'>CRITICAL</div></div>
+    <div style='background:#2d1f0f;border:1px solid #f97316;border-radius:8px;padding:14px;flex:1;text-align:center'>
+      <div style='font-size:24px;font-weight:700;color:#f97316'>{high_n}</div>
+      <div style='font-size:11px;color:#fdba74'>HIGH RISK</div></div>
+    <div style='background:#1a2000;border:1px solid #eab308;border-radius:8px;padding:14px;flex:1;text-align:center'>
+      <div style='font-size:24px;font-weight:700;color:#eab308'>{repl_n}</div>
+      <div style='font-size:11px;color:#fde047'>NEED REPLACE</div></div>
+  </div>
+  <table style='width:100%;background:#111827;border-radius:8px;border-collapse:collapse;font-size:13px'>
+    <tr style='color:#64748b;font-size:11px'>
+      <th style='padding:8px'>Equipment</th><th style='padding:8px'>Type</th>
+      <th style='padding:8px'>Level</th><th style='padding:8px'>Prob</th><th style='padding:8px'>Days</th>
+    </tr>{rows5}
+  </table>
+  <p style='color:#94a3b8;font-size:12px;margin-top:16px'>Sent from NALCO HEMM Dashboard</p>
+</div></body></html>"""
+
+                    msg = MIMEMultipart('alternative')
+                    msg['Subject'] = f"NALCO HEMM ALERT — {crit_n} CRITICAL, {high_n} HIGH — {time.strftime('%d %b %Y')}"
+                    msg['From']    = em_sender
+                    msg['To']      = em_receiver
+                    msg.attach(MIMEText(f"NALCO HEMM: {crit_n} CRITICAL, {high_n} HIGH, {repl_n} need replacement.", 'plain'))
+                    msg.attach(MIMEText(html_body, 'html'))
+
+                    server = smtplib.SMTP('smtp.gmail.com', 587)
+                    server.starttls()
+                    server.login(em_sender, em_password)
+                    server.sendmail(em_sender, em_receiver, msg.as_string())
+                    server.quit()
+                    st.success(f"Email sent to {em_receiver}!")
+                except smtplib.SMTPAuthenticationError:
+                    st.error("Auth failed — use Gmail App Password, not your normal password")
+                except Exception as e:
+                    st.error(f"Failed: {e}")
+
+        if test_btn and em_sender and em_password and em_receiver:
+            with st.spinner("Sending test..."):
+                try:
+                    msg = MIMEMultipart()
+                    msg['Subject'] = "NALCO HEMM — Test Email (system working)"
+                    msg['From']    = em_sender
+                    msg['To']      = em_receiver
+                    msg.attach(MIMEText("Test email from NALCO HEMM Dashboard. Your email alerts are configured correctly!", 'plain'))
+                    server = smtplib.SMTP('smtp.gmail.com', 587)
+                    server.starttls()
+                    server.login(em_sender, em_password)
+                    server.sendmail(em_sender, em_receiver, msg.as_string())
+                    server.quit()
+                    st.success("Test email sent!")
+                except Exception as e:
+                    st.error(f"Failed: {e}")
 
     st.markdown("### Filters")
     alert_filter = st.multiselect(
@@ -752,14 +845,15 @@ elif page == "🔧 Equipment Detail":
             css   = f"alert-{sev.lower()}" if sev in ['CRITICAL','HIGH','MEDIUM'] else 'alert-ok'
             s_icon = ICONS.get(sev,'⚪')
             is_replace = 'REPLACE' in act
-            st.markdown(f"""
-            <div class='{css}'>
-                <b>{s_icon} [{sev}] {comp}</b>
-                {'<span style="background:#ef4444;color:white;border-radius:4px;padding:1px 8px;font-size:11px;margin-left:8px">⚠ REPLACEMENT NEEDED</span>' if is_replace else ''}
-                <br>
-                <span style='color:#94a3b8;font-size:13px'>Problem: {prob2}</span><br>
-                <span style='color:#e2e8f0;font-size:13px'>→ <b>{act}</b></span>
-            </div>""", unsafe_allow_html=True)
+            rep_html = '<span style="background:#ef4444;color:white;border-radius:4px;padding:1px 8px;font-size:11px;margin-left:8px">⚠ REPLACEMENT NEEDED</span>' if is_replace else ''
+            card_html = (
+                "<div class='" + css + "'>"
+                "<b>" + s_icon + " [" + sev + "] " + comp + "</b>" + rep_html +
+                "<br><span style='color:#94a3b8;font-size:13px'>Problem: " + prob2 + "</span>"
+                "<br><span style='color:#e2e8f0;font-size:13px'>Action: <b>" + act + "</b></span>"
+                "</div>"
+            )
+            st.markdown(card_html, unsafe_allow_html=True)
 
         # ── Current Sensor Readings ──────────────────────────────────────
         st.markdown("<br>", unsafe_allow_html=True)
