@@ -35,6 +35,16 @@ from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import roc_auc_score, accuracy_score, f1_score, recall_score
 from sklearn.utils.class_weight import compute_class_weight
 
+# ── Default values — fixes Pylance warnings (not errors) ────────────
+alerts_df  = pd.DataFrame()
+df         = pd.DataFrame()
+X          = pd.DataFrame()
+feat_cols  = []
+metrics    = {'auc':0,'accuracy':0,'recall':0,'f1':0}
+fi         = pd.Series(dtype=float)
+ens        = None
+reg        = None
+
 # ── Page config ──────────────────────────────────────────────────────
 st.set_page_config(
     page_title="NALCO HEMM Dashboard",
