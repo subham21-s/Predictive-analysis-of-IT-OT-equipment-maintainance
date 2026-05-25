@@ -35,9 +35,6 @@ from sklearn.ensemble import (RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import roc_auc_score, accuracy_score, f1_score, recall_score
 from sklearn.utils.class_weight import compute_class_weight
 
-# ── Default values to avoid Pylance warnings ──
-alerts_df = pd.DataFrame()
-
 # ── Page config ──────────────────────────────────────────────────────
 st.set_page_config(
     page_title="NALCO HEMM Dashboard",
@@ -1920,341 +1917,465 @@ elif page == "👷 Operator Insights":
 # ══════════════════════════════════════════════════════════════════════
 elif page == "🎯 Predict Machine":
     st.markdown("# 🎯 Predict Single Machine")
-    st.markdown("Enter live sensor readings for any machine and get an **instant prediction** — will it fail, when, and what to do.")
+    st.markdown("Enter sensor readings manually **or** load from an existing machine — get instant failure prediction, risk gauge, what-if analysis and maintenance schedule.")
     st.markdown("---")
 
-    # ── Sensor input form ─────────────────────────────────────────────
-    st.markdown("<div class='section-title'>Step 1 — Enter Machine Details</div>", unsafe_allow_html=True)
+    # ── PRE-FILL from existing machine ───────────────────────────────────
+    st.markdown("<div class='section-title'>Quick Load — Pre-fill from Existing Machine</div>", unsafe_allow_html=True)
+    pf_col1, pf_col2, pf_col3 = st.columns([2, 2, 1])
+    with pf_col1:
+        all_eq_ids = sorted(alerts_df['Equipment_ID'].unique().tolist())
+        prefill_eq = st.selectbox("Select existing machine to load its sensor readings", ["-- Manual entry --"] + all_eq_ids, key="pf_eq")
+    with pf_col2:
+        if prefill_eq != "-- Manual entry --":
+            prefill_row = df[df['Equipment_ID'] == prefill_eq].iloc[0] if 'Equipment_ID' in df.columns and len(df[df['Equipment_ID'] == prefill_eq]) > 0 else None
+            if prefill_row is not None:
+                pf_prob = alerts_df[alerts_df['Equipment_ID'] == prefill_eq]['Failure_Probability_%'].iloc[0]
+                pf_lvl  = alerts_df[alerts_df['Equipment_ID'] == prefill_eq]['Alert_Level'].iloc[0]
+                pf_days = alerts_df[alerts_df['Equipment_ID'] == prefill_eq]['Days_to_Failure'].iloc[0]
+                lvl_c   = {'CRITICAL':'#ef4444','HIGH':'#f97316','MEDIUM':'#3b82f6','OK':'#22c55e'}.get(pf_lvl,'#64748b')
+                st.markdown(f"""
+                <div style='background:#111827;border:1px solid {lvl_c};border-radius:8px;padding:12px;margin-top:8px'>
+                    <span style='color:{lvl_c};font-weight:600'>{pf_lvl}</span>
+                    &nbsp;|&nbsp; Fail: <b style='color:{lvl_c}'>{pf_prob:.1f}%</b>
+                    &nbsp;|&nbsp; Days left: <b style='color:#22c55e'>{int(pf_days)}</b>
+                </div>""", unsafe_allow_html=True)
+    with pf_col3:
+        st.markdown("<br>", unsafe_allow_html=True)
+        use_prefill = prefill_eq != "-- Manual entry --" and 'prefill_row' in dir() and prefill_row is not None
 
+    def get_val(col, default, row=None):
+        if row is not None and col in row.index:
+            v = row[col]
+            if pd.notna(v):
+                return float(v)
+        return default
+
+    pr = prefill_row if use_prefill else None
+
+    st.markdown("---")
+    st.markdown("<div class='section-title'>Step 1 — Machine Details</div>", unsafe_allow_html=True)
     col_a, col_b, col_c = st.columns(3)
     with col_a:
-        eq_type_input = st.selectbox("Equipment Type", 
-            ["Dumper","Excavator","Dozer","Grader","Drill Rig","Wheel Loader","Scraper"])
-        shift_input   = st.selectbox("Current Shift", ["Day","Afternoon","Night"])
-        road_input    = st.selectbox("Road Condition", ["Good","Fair","Poor"])
+        EQ_NAMES = ["Dumper","Excavator","Dozer","Grader","Drill Rig","Wheel Loader","Scraper"]
+        eq_default = 0
+        if pr is not None and 'Equipment_Type_enc' in pr.index:
+            eq_default = min(int(get_val('Equipment_Type_enc', 0, pr)), len(EQ_NAMES)-1)
+        eq_type_input = st.selectbox("Equipment Type", EQ_NAMES, index=eq_default, key="pm_eq")
+        shift_default = int(get_val('Shift_enc', 0, pr))
+        shift_input   = st.selectbox("Current Shift", ["Day","Afternoon","Night"], index=min(shift_default, 2), key="pm_sh")
+        road_default  = int(get_val('Road_Condition_enc', 0, pr))
+        road_input    = st.selectbox("Road Condition", ["Good","Fair","Poor"], index=min(road_default, 2), key="pm_rd")
     with col_b:
-        op_exp        = st.number_input("Operator Experience (years)", 0.0, 40.0, 5.0, 0.5)
-        op_hours      = st.number_input("Operating Hours (total)", 0, 50000, 5000, 100)
-        load_cycles   = st.number_input("Load Cycles per Day", 0, 100, 20, 1)
+        op_exp      = st.number_input("Operator Experience (years)", 0.0, 40.0, get_val('Operator_Experience_Yr', 5.0, pr), 0.5, key="pm_exp")
+        op_hours    = st.number_input("Operating Hours (total)",    0, 50000, int(get_val('Operating_Hours', 5000, pr)), 100, key="pm_hr")
+        load_cycles = st.number_input("Load Cycles per Day",        0, 100,   int(get_val('Load_Cycles_per_Day', 20, pr)), 1, key="pm_lc")
     with col_c:
-        days_since_pm = st.number_input("Days Since Last Maintenance", 0, 365, 30, 1)
-        pm_interval   = st.number_input("PM Interval (hours)", 100, 1000, 250, 50)
-        next_pm_due   = st.number_input("Next PM Due (hours)", 0, 1000, 180, 10)
+        days_since_pm = st.number_input("Days Since Last Maintenance", 0, 365, int(get_val('Days_Since_Last_Maintenance', 30, pr)), 1, key="pm_dsm")
+        pm_interval   = st.number_input("PM Interval (hours)", 100, 1000, int(get_val('PM_Interval_Hours', 250, pr)), 50, key="pm_pi")
+        next_pm_due   = st.number_input("Next PM Due (hours)",  0, 1000, int(get_val('Next_PM_Due_Hours', 180, pr)), 10, key="pm_npd")
 
-    st.markdown("<div class='section-title'>Step 2 — Enter Sensor Readings</div>", unsafe_allow_html=True)
-
+    st.markdown("<div class='section-title'>Step 2 — Sensor Readings</div>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
     with c1:
-        engine_temp   = st.slider("Engine Temperature (°C)",    50.0,  130.0,  85.0,  0.5)
-        oil_pressure  = st.slider("Oil Pressure (bar)",          1.0,    7.0,   3.5,  0.1)
-        vibration     = st.slider("Vibration (mm/s)",            0.0,    8.0,   2.5,  0.1)
-        rpm_val       = st.slider("RPM",                       500.0, 3000.0,1800.0, 10.0)
+        engine_temp  = st.slider("Engine Temperature (°C)",   50.0, 130.0, get_val('Engine_Temp_C', 85.0, pr), 0.5, key="pm_et")
+        oil_pressure = st.slider("Oil Pressure (bar)",         1.0,   7.0, get_val('Oil_Pressure_bar', 3.5, pr), 0.1, key="pm_op")
+        vibration    = st.slider("Vibration (mm/s)",           0.0,   8.0, get_val('Vibration_mms', 2.5, pr), 0.1, key="pm_vib")
+        rpm_val      = st.slider("RPM",                      500.0,3000.0, get_val('RPM', 1800.0, pr), 10.0, key="pm_rpm")
     with c2:
-        hydraulic_p   = st.slider("Hydraulic Pressure (bar)",  100.0,  320.0, 210.0,  5.0)
-        exhaust_temp  = st.slider("Exhaust Temperature (°C)",  150.0,  550.0, 320.0,  5.0)
-        fuel_consump  = st.slider("Fuel Consumption (L/hr)",    10.0,   60.0,  28.0,  0.5)
-        battery_v     = st.slider("Battery Voltage (V)",        10.0,   16.0,  12.6,  0.1)
+        hydraulic_p  = st.slider("Hydraulic Pressure (bar)", 100.0, 320.0, get_val('Hydraulic_Pressure_bar', 210.0, pr), 5.0, key="pm_hp")
+        exhaust_temp = st.slider("Exhaust Temperature (°C)", 150.0, 550.0, get_val('Exhaust_Temp_C', 320.0, pr), 5.0, key="pm_ext")
+        fuel_consump = st.slider("Fuel Consumption (L/hr)",   10.0,  60.0, get_val('Fuel_Consumption_Lhr', 28.0, pr), 0.5, key="pm_fc")
+        battery_v    = st.slider("Battery Voltage (V)",        10.0,  16.0, get_val('Battery_Voltage_V', 12.6, pr), 0.1, key="pm_bv")
     with c3:
-        tyre_psi      = st.slider("Tyre Pressure (PSI)",        60.0,  130.0,  95.0,  1.0)
-        coolant_lvl   = st.slider("Coolant Level (0-1)",         0.0,    1.0,   0.8,  0.01)
-        engine_life   = st.slider("Engine Life Remaining (%)",   0.0,  100.0,  60.0,  1.0)
-        brake_life    = st.slider("Brake Life Remaining (%)",    0.0,  100.0,  55.0,  1.0)
+        tyre_psi     = st.slider("Tyre Pressure (PSI)",        60.0, 130.0, get_val('Tyre_Pressure_PSI', 95.0, pr), 1.0, key="pm_tp")
+        coolant_lvl  = st.slider("Coolant Level (0-1)",         0.0,   1.0, get_val('Coolant_Level', 0.8, pr), 0.01, key="pm_cl")
+        engine_life  = st.slider("Engine Life Remaining (%)",   0.0, 100.0, get_val('Engine_Life_Remaining_pct', 60.0, pr), 1.0, key="pm_el")
+        brake_life   = st.slider("Brake Life Remaining (%)",    0.0, 100.0, get_val('Brake_Life_Remaining_pct', 55.0, pr), 1.0, key="pm_bl")
 
     c4, c5 = st.columns(2)
     with c4:
-        tyre_life     = st.slider("Tyre Life Remaining (%)",      0.0, 100.0, 65.0, 1.0)
-        hydraulic_life= st.slider("Hydraulic Life Remaining (%)", 0.0, 100.0, 70.0, 1.0)
+        tyre_life      = st.slider("Tyre Life Remaining (%)",      0.0, 100.0, get_val('Tyre_Life_Remaining_pct', 65.0, pr), 1.0, key="pm_tl")
+        hydraulic_life = st.slider("Hydraulic Life Remaining (%)", 0.0, 100.0, get_val('Hydraulic_Life_Remaining_pct', 70.0, pr), 1.0, key="pm_hl")
     with c5:
-        battery_life  = st.slider("Battery Life Remaining (%)",   0.0, 100.0, 72.0, 1.0)
-        brake_replace = st.selectbox("Brake Replacement Needed?", ["No","Yes"])
+        battery_life  = st.slider("Battery Life Remaining (%)", 0.0, 100.0, get_val('Battery_Life_Remaining_pct', 72.0, pr), 1.0, key="pm_ball")
+        brake_replace = st.selectbox("Brake Replacement Needed?", ["No","Yes"], key="pm_br")
 
     st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── Predict button ────────────────────────────────────────────────
     predict_btn = st.button("🚀 Run Prediction", type="primary", use_container_width=True)
 
     if predict_btn:
-        # Encode categorical inputs
-        eq_enc   = {"Excavator":0,"Dumper":1,"Dozer":2,"Grader":3,
-                    "Drill Rig":4,"Wheel Loader":5,"Scraper":6}.get(eq_type_input, 0)
-        sh_enc   = {"Day":0,"Afternoon":1,"Night":2}.get(shift_input, 0)
-        rd_enc   = {"Good":0,"Fair":1,"Poor":2}.get(road_input, 0)
-        br_enc   = 1 if brake_replace == "Yes" else 0
+        # ── Encode inputs ──────────────────────────────────────────────
+        eq_enc = {"Excavator":0,"Dumper":1,"Dozer":2,"Grader":3,"Drill Rig":4,"Wheel Loader":5,"Scraper":6}.get(eq_type_input,0)
+        sh_enc = {"Day":0,"Afternoon":1,"Night":2}.get(shift_input,0)
+        rd_enc = {"Good":0,"Fair":1,"Poor":2}.get(road_input,0)
+        br_enc = 1 if brake_replace=="Yes" else 0
 
-        # Derived features
-        temp_oil_ratio = engine_temp / max(oil_pressure, 0.1)
-        vib_rpm_ratio  = vibration   / max(rpm_val, 1)
-
-        # Status encodings (0=normal, 1=warning, 2=critical)
-        def status_enc(val, low, high, danger_high):
-            if val > danger_high: return 2
-            elif val > high or val < low: return 1
+        def status_enc(val, lo, hi, danger):
+            if val > danger: return 2
+            elif val > hi or val < lo: return 1
             return 0
 
-        eng_status  = status_enc(engine_temp,  70, 100, 105)
-        oil_status  = status_enc(oil_pressure, 2.5, 5.0, 5.5)
-        vib_status  = status_enc(vibration,    0,   4.5, 5.0)
-        fuel_status = status_enc(fuel_consump, 15,  45,  52)
-        tyre_status = status_enc(tyre_psi,     80, 110, 115)
-        cool_status = 2 if coolant_lvl < 0.3 else 1 if coolant_lvl < 0.5 else 0
-        bat_status  = status_enc(battery_v,    11.5, 14.5, 15.0)
-        hyd_status  = status_enc(hydraulic_p,  150, 280, 290)
-        exh_status  = status_enc(exhaust_temp, 200, 450, 500)
-        rpm_status  = status_enc(rpm_val,      600, 2500, 2800)
+        eng_st  = status_enc(engine_temp,  70,  100, 105)
+        oil_st  = status_enc(oil_pressure, 2.5, 5.0, 5.5)
+        vib_st  = status_enc(vibration,    0,   4.5, 5.0)
+        fuel_st = status_enc(fuel_consump, 15,  45,  52)
+        tyre_st = status_enc(tyre_psi,     80,  110, 115)
+        cool_st = 2 if coolant_lvl < 0.3 else 1 if coolant_lvl < 0.5 else 0
+        bat_st  = status_enc(battery_v,    11.5,14.5, 15.0)
+        hyd_st  = status_enc(hydraulic_p,  150, 280, 290)
+        exh_st  = status_enc(exhaust_temp, 200, 450, 500)
+        rpm_st  = status_enc(rpm_val,      600, 2500,2800)
 
-        # Build input row matching FEATURE_COLS order
         input_data = {
-            'Engine_Temp_C':                  engine_temp,
-            'Oil_Pressure_bar':               oil_pressure,
-            'Vibration_mms':                  vibration,
-            'Fuel_Consumption_Lhr':           fuel_consump,
-            'Tyre_Pressure_PSI':              tyre_psi,
-            'Coolant_Level':                  coolant_lvl,
-            'Battery_Voltage_V':              battery_v,
-            'Hydraulic_Pressure_bar':         hydraulic_p,
-            'Exhaust_Temp_C':                 exhaust_temp,
-            'RPM':                            rpm_val,
-            'Engine_Temp_C_Status_enc':       eng_status,
-            'Oil_Pressure_bar_Status_enc':    oil_status,
-            'Vibration_mms_Status_enc':       vib_status,
-            'Fuel_Consumption_Lhr_Status_enc':fuel_status,
-            'Tyre_Pressure_PSI_Status_enc':   tyre_status,
-            'Coolant_Level_Status_enc':       cool_status,
-            'Battery_Voltage_V_Status_enc':   bat_status,
-            'Hydraulic_Pressure_bar_Status_enc': hyd_status,
-            'Exhaust_Temp_C_Status_enc':      exh_status,
-            'RPM_Status_enc':                 rpm_status,
-            'Temp_Oil_Ratio':                 temp_oil_ratio,
-            'Vib_RPM_Ratio':                  vib_rpm_ratio,
-            'Operating_Hours':                op_hours,
-            'Load_Cycles_per_Day':            load_cycles,
-            'Operator_Experience_Yr':         op_exp,
-            'Equipment_Type_enc':             eq_enc,
-            'Shift_enc':                      sh_enc,
-            'Road_Condition_enc':             rd_enc,
-            'Year':                           pd.Timestamp.now().year,
-            'Month':                          pd.Timestamp.now().month,
-            'Day_of_Week':                    pd.Timestamp.now().dayofweek,
-            'Engine_Condition_enc':           2 if engine_life > 60 else 1 if engine_life > 30 else 0,
-            'Tyre_Condition_enc':             2 if tyre_life   > 60 else 1 if tyre_life   > 30 else 0,
-            'Hydraulic_Condition_enc':        2 if hydraulic_life > 60 else 1 if hydraulic_life > 30 else 0,
-            'Brake_Condition_enc':            2 if brake_life  > 60 else 1 if brake_life  > 30 else 0,
-            'Electrical_Condition_enc':       2 if battery_life > 60 else 1 if battery_life > 30 else 0,
-            'Fuel_System_Condition_enc':      1,
-            'Transmission_Condition_enc':     1,
-            'Cooling_System_Condition_enc':   2 if coolant_lvl > 0.6 else 1,
-            'Engine_Life_Remaining_pct':      engine_life,
-            'Tyre_Life_Remaining_pct':        tyre_life,
-            'Hydraulic_Life_Remaining_pct':   hydraulic_life,
-            'Battery_Life_Remaining_pct':     battery_life,
-            'Brake_Life_Remaining_pct':       brake_life,
-            'Days_Since_Last_Maintenance':    days_since_pm,
-            'Last_Maintenance_Type_enc':      1,
-            'PM_Interval_Hours':              pm_interval,
-            'Next_PM_Due_Hours':              next_pm_due,
-            'Maintenance_Team_enc':           0,
-            'Brake_Replacement_Needed_enc':   br_enc,
+            'Engine_Temp_C': engine_temp, 'Oil_Pressure_bar': oil_pressure,
+            'Vibration_mms': vibration, 'Fuel_Consumption_Lhr': fuel_consump,
+            'Tyre_Pressure_PSI': tyre_psi, 'Coolant_Level': coolant_lvl,
+            'Battery_Voltage_V': battery_v, 'Hydraulic_Pressure_bar': hydraulic_p,
+            'Exhaust_Temp_C': exhaust_temp, 'RPM': rpm_val,
+            'Engine_Temp_C_Status_enc': eng_st, 'Oil_Pressure_bar_Status_enc': oil_st,
+            'Vibration_mms_Status_enc': vib_st, 'Fuel_Consumption_Lhr_Status_enc': fuel_st,
+            'Tyre_Pressure_PSI_Status_enc': tyre_st, 'Coolant_Level_Status_enc': cool_st,
+            'Battery_Voltage_V_Status_enc': bat_st, 'Hydraulic_Pressure_bar_Status_enc': hyd_st,
+            'Exhaust_Temp_C_Status_enc': exh_st, 'RPM_Status_enc': rpm_st,
+            'Temp_Oil_Ratio': engine_temp / max(oil_pressure, 0.1),
+            'Vib_RPM_Ratio':  vibration   / max(rpm_val, 1),
+            'Operating_Hours': op_hours, 'Load_Cycles_per_Day': load_cycles,
+            'Operator_Experience_Yr': op_exp, 'Equipment_Type_enc': eq_enc,
+            'Shift_enc': sh_enc, 'Road_Condition_enc': rd_enc,
+            'Year': pd.Timestamp.now().year, 'Month': pd.Timestamp.now().month,
+            'Day_of_Week': pd.Timestamp.now().dayofweek,
+            'Engine_Condition_enc':     2 if engine_life>60 else 1 if engine_life>30 else 0,
+            'Tyre_Condition_enc':       2 if tyre_life>60   else 1 if tyre_life>30   else 0,
+            'Hydraulic_Condition_enc':  2 if hydraulic_life>60 else 1 if hydraulic_life>30 else 0,
+            'Brake_Condition_enc':      2 if brake_life>60  else 1 if brake_life>30  else 0,
+            'Electrical_Condition_enc': 2 if battery_life>60 else 1 if battery_life>30 else 0,
+            'Fuel_System_Condition_enc': 1, 'Transmission_Condition_enc': 1,
+            'Cooling_System_Condition_enc': 2 if coolant_lvl>0.6 else 1,
+            'Engine_Life_Remaining_pct': engine_life, 'Tyre_Life_Remaining_pct': tyre_life,
+            'Hydraulic_Life_Remaining_pct': hydraulic_life, 'Battery_Life_Remaining_pct': battery_life,
+            'Brake_Life_Remaining_pct': brake_life,
+            'Days_Since_Last_Maintenance': days_since_pm, 'Last_Maintenance_Type_enc': 1,
+            'PM_Interval_Hours': pm_interval, 'Next_PM_Due_Hours': next_pm_due,
+            'Maintenance_Team_enc': 0, 'Brake_Replacement_Needed_enc': br_enc,
         }
-
-        # Build DataFrame aligned to feat_cols
         input_row = pd.DataFrame([{c: input_data.get(c, 0) for c in feat_cols}])
 
-        # Run models
         fail_prob   = float(ens.predict_proba(input_row)[0][1]) * 100
         days_left   = max(0, int(reg.predict(input_row)[0]))
         alert_level = get_alert_level(fail_prob / 100)
-        icon        = ICONS.get(alert_level, "⚪")
-        color       = LEVEL_COLORS.get(alert_level, "#64748b")
+        color       = LEVEL_COLORS.get(alert_level, '#64748b')
+        icon        = ICONS.get(alert_level, '⚪')
 
-        # ── Result banner ─────────────────────────────────────────────
-        st.markdown("<br>", unsafe_allow_html=True)
+        # ── RESULT BANNER ──────────────────────────────────────────────
+        st.markdown("---")
         st.markdown("<div class='section-title'>Prediction Result</div>", unsafe_allow_html=True)
 
-        st.markdown(f"""
-        <div style='background:linear-gradient(135deg,#0f172a,#1e293b);
-                    border:2px solid {color};border-radius:16px;
-                    padding:28px 32px;margin:8px 0'>
-            <div style='display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:20px;align-items:center'>
-                <div>
-                    <div style='font-size:12px;color:#64748b;letter-spacing:.1em;
-                                text-transform:uppercase;margin-bottom:6px'>Prediction Result</div>
-                    <div style='font-size:2.2rem;font-weight:700;color:{color}'>{icon} {alert_level}</div>
-                    <div style='font-size:13px;color:#94a3b8;margin-top:6px'>{eq_type_input} — {shift_input} Shift</div>
-                </div>
-                <div style='text-align:center'>
-                    <div style='font-size:12px;color:#64748b;margin-bottom:4px'>Failure Probability</div>
-                    <div style='font-size:2rem;font-weight:700;color:{color}'>{fail_prob:.1f}%</div>
-                </div>
-                <div style='text-align:center'>
-                    <div style='font-size:12px;color:#64748b;margin-bottom:4px'>Days to Failure</div>
-                    <div style='font-size:2rem;font-weight:700;color:#22c55e'>{days_left}d</div>
-                </div>
-                <div style='text-align:center'>
-                    <div style='font-size:12px;color:#64748b;margin-bottom:4px'>Operator Risk</div>
-                    <div style='font-size:1.4rem;font-weight:700;color:{"#ef4444" if op_exp < 2 else "#f97316" if op_exp < 5 else "#22c55e"}'>
-                        {"HIGH" if op_exp < 2 else "MEDIUM" if op_exp < 5 else "LOW"}
-                    </div>
-                    <div style='font-size:11px;color:#64748b'>{op_exp} yrs exp</div>
-                </div>
-            </div>
-        </div>""", unsafe_allow_html=True)
+        r1, r2, r3, r4 = st.columns(4)
+        with r1:
+            st.markdown(f"<div class='metric-card' style='border-color:{color}'><div class='metric-val' style='color:{color};font-size:1.6rem'>{icon} {alert_level}</div><div class='metric-label'>Alert Level</div></div>", unsafe_allow_html=True)
+        with r2:
+            st.markdown(f"<div class='metric-card' style='border-color:{color}'><div class='metric-val' style='color:{color}'>{fail_prob:.1f}%</div><div class='metric-label'>Failure Probability</div></div>", unsafe_allow_html=True)
+        with r3:
+            days_color = '#ef4444' if days_left < 7 else '#f97316' if days_left < 14 else '#22c55e'
+            st.markdown(f"<div class='metric-card' style='border-color:{days_color}'><div class='metric-val' style='color:{days_color}'>{days_left}d</div><div class='metric-label'>Days to Failure</div></div>", unsafe_allow_html=True)
+        with r4:
+            op_color = '#ef4444' if op_exp < 2 else '#f97316' if op_exp < 5 else '#22c55e'
+            op_risk  = 'HIGH' if op_exp < 2 else 'MEDIUM' if op_exp < 5 else 'LOW'
+            st.markdown(f"<div class='metric-card' style='border-color:{op_color}'><div class='metric-val' style='color:{op_color};font-size:1.4rem'>{op_risk}</div><div class='metric-label'>Operator Risk ({op_exp:.0f} yrs)</div></div>", unsafe_allow_html=True)
 
-        # ── Sensor health cards ───────────────────────────────────────
+        # ── RISK GAUGE ─────────────────────────────────────────────────
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("<div class='section-title'>Sensor Status at Time of Prediction</div>",
-                    unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Risk Gauge</div>", unsafe_allow_html=True)
 
+        fig_g, ax_g = plt.subplots(figsize=(10, 4), subplot_kw=dict(projection='polar'))
+        fig_g.patch.set_facecolor('#111827')
+        ax_g.set_facecolor('#111827')
+
+        # Draw gauge arcs
+        theta_start = np.pi
+        theta_end   = 0
+        for start_p, end_p, col_arc in [(0,30,'#22c55e'),(30,60,'#84cc16'),(60,75,'#eab308'),(75,90,'#f97316'),(90,100,'#ef4444')]:
+            t_s = theta_start - (start_p/100) * np.pi
+            t_e = theta_start - (end_p/100)   * np.pi
+            theta_arc = np.linspace(t_s, t_e, 50)
+            ax_g.plot(theta_arc, [0.85]*50, color=col_arc, linewidth=18, alpha=0.9, solid_capstyle='butt')
+
+        # Needle
+        needle_angle = theta_start - (fail_prob/100) * np.pi
+        ax_g.plot([needle_angle, needle_angle], [0, 0.75], color='white', linewidth=3, zorder=5)
+        ax_g.plot([needle_angle], [0], 'o', color='white', markersize=10, zorder=6)
+
+        # Labels
+        for pct, label in [(0,'0'),(25,'25'),(50,'50'),(75,'75'),(100,'100%')]:
+            angle = theta_start - (pct/100) * np.pi
+            ax_g.text(angle, 1.05, label, ha='center', va='center',
+                      color='#94a3b8', fontsize=9, fontweight='bold')
+
+        ax_g.text(np.pi/2, 0.45, f'{fail_prob:.1f}%', ha='center', va='center',
+                  color=color, fontsize=22, fontweight='bold')
+        ax_g.text(np.pi/2, 0.22, alert_level, ha='center', va='center',
+                  color=color, fontsize=13)
+
+        ax_g.set_ylim(0, 1.2)
+        ax_g.set_xlim(0, np.pi)
+        ax_g.set_theta_zero_location('E')
+        ax_g.set_theta_direction(-1)
+        ax_g.axis('off')
+
+        legend_labels = ['SAFE (0-30%)', 'MONITOR (30-60%)', 'WARNING (60-75%)', 'HIGH (75-90%)', 'CRITICAL (90-100%)']
+        legend_colors = ['#22c55e','#84cc16','#eab308','#f97316','#ef4444']
+        for i, (lbl, lc) in enumerate(zip(legend_labels, legend_colors)):
+            ax_g.text(np.pi/2, -0.1 - i*0.12, lbl, ha='center', va='center',
+                      color=lc, fontsize=8)
+
+        plt.tight_layout()
+        st.pyplot(fig_g, use_container_width=True)
+        plt.close()
+
+        # ── SENSOR STATUS CARDS ────────────────────────────────────────
+        st.markdown("<div class='section-title'>Sensor Status</div>", unsafe_allow_html=True)
         sensor_checks = [
-            ("Engine Temp",     engine_temp,  "°C",  70,  100, 105),
-            ("Oil Pressure",    oil_pressure, "bar", 2.5, 5.0, 5.5),
-            ("Vibration",       vibration,    "mm/s",0,   4.5, 5.0),
-            ("Hydraulic Press", hydraulic_p,  "bar", 150, 280, 290),
-            ("Battery Voltage", battery_v,    "V",   11.5,14.5,15.0),
-            ("Exhaust Temp",    exhaust_temp, "°C",  200, 450, 500),
+            ("Engine Temp",    engine_temp,  "°C",   70,  100, 105),
+            ("Oil Pressure",   oil_pressure, "bar",  2.5, 5.0, 5.5),
+            ("Vibration",      vibration,    "mm/s", 0,   4.5, 5.0),
+            ("Hydraulic",      hydraulic_p,  "bar",  150, 280, 290),
+            ("Battery",        battery_v,    "V",    11.5,14.5,15.0),
+            ("Exhaust Temp",   exhaust_temp, "°C",   200, 450, 500),
         ]
         sc_cols = st.columns(6)
         for i, (name, val, unit, lo, hi, danger) in enumerate(sensor_checks):
-            is_dan = val > danger
-            is_hi  = val > hi
-            is_lo  = val < lo
-            c      = "#ef4444" if is_dan else "#f97316" if (is_hi or is_lo) else "#22c55e"
-            s      = "DANGER" if is_dan else "HIGH" if is_hi else "LOW" if is_lo else "OK"
+            c  = "#ef4444" if val>danger else "#f97316" if (val>hi or val<lo) else "#22c55e"
+            s  = "DANGER" if val>danger else "HIGH" if val>hi else "LOW" if val<lo else "OK"
             with sc_cols[i]:
-                st.markdown(
-                    "<div class='metric-card' style='border-color:" + c + "'>"
-                    "<div class='metric-val' style='color:" + c + ";font-size:1.2rem'>"
-                    + str(round(val,1)) + " " + unit + "</div>"
-                    "<div class='metric-label'>" + name + "</div>"
-                    "<div style='font-size:10px;color:" + c + ";margin-top:3px'>" + s + "</div>"
-                    "</div>", unsafe_allow_html=True)
+                st.markdown("<div class='metric-card' style='border-color:" + c + "'><div class='metric-val' style='color:" + c + ";font-size:1.1rem'>" + str(round(val,1)) + " " + unit + "</div><div class='metric-label'>" + name + "</div><div style='font-size:10px;color:" + c + ";margin-top:3px'>" + s + "</div></div>", unsafe_allow_html=True)
 
-        # ── Component life cards ──────────────────────────────────────
-        st.markdown("<div class='section-title'>Component Life at Time of Prediction</div>",
-                    unsafe_allow_html=True)
-        life_checks = [
-            ("Engine",     engine_life),
-            ("Brakes",     brake_life),
-            ("Tyres",      tyre_life),
-            ("Hydraulics", hydraulic_life),
-            ("Battery",    battery_life),
-        ]
+        # ── COMPONENT LIFE BARS ────────────────────────────────────────
+        st.markdown("<div class='section-title'>Component Life Remaining</div>", unsafe_allow_html=True)
+        life_items = [("Engine", engine_life), ("Brakes", brake_life),
+                      ("Tyres", tyre_life), ("Hydraulics", hydraulic_life), ("Battery", battery_life)]
         lc_cols = st.columns(5)
-        for i, (name, val) in enumerate(life_checks):
-            c = "#ef4444" if val < 15 else "#f97316" if val < 30 else "#22c55e"
-            s = "REPLACE NOW" if val < 15 else "REPLACE SOON" if val < 30 else "OK"
+        for i, (name, val) in enumerate(life_items):
+            c = "#ef4444" if val<15 else "#f97316" if val<30 else "#22c55e"
+            s = "REPLACE NOW" if val<15 else "REPLACE SOON" if val<30 else "OK"
             with lc_cols[i]:
-                st.markdown(
-                    "<div class='metric-card' style='border-color:" + c + "'>"
-                    "<div class='metric-val' style='color:" + c + ";font-size:1.4rem'>"
-                    + str(round(val)) + "%</div>"
-                    "<div class='metric-label'>" + name + " Life</div>"
-                    "<div style='font-size:10px;color:" + c + ";margin-top:3px'>" + s + "</div>"
-                    "</div>", unsafe_allow_html=True)
+                st.markdown("<div class='metric-card' style='border-color:" + c + "'><div class='metric-val' style='color:" + c + ";font-size:1.3rem'>" + str(round(val)) + "%</div><div class='metric-label'>" + name + "</div><div style='font-size:10px;color:" + c + ";margin-top:3px'>" + s + "</div></div>", unsafe_allow_html=True)
 
-        # ── Prescriptive diagnosis ────────────────────────────────────
-        st.markdown("<div class='section-title'>Prescriptive Diagnosis</div>",
-                    unsafe_allow_html=True)
+        # ── DIAGNOSIS ─────────────────────────────────────────────────
+        st.markdown("<div class='section-title'>Prescriptive Diagnosis</div>", unsafe_allow_html=True)
         row_dict = {
-            'Engine_Life_Remaining_pct':         engine_life,
-            'Brake_Life_Remaining_pct':          brake_life,
-            'Tyre_Life_Remaining_pct':           tyre_life,
-            'Hydraulic_Life_Remaining_pct':      hydraulic_life,
-            'Battery_Life_Remaining_pct':        battery_life,
-            'Engine_Temp_C_Status_enc':          eng_status,
-            'Oil_Pressure_bar_Status_enc':       oil_status,
-            'Vibration_mms_Status_enc':          vib_status,
-            'Hydraulic_Pressure_bar_Status_enc': hyd_status,
-            'Battery_Voltage_V_Status_enc':      bat_status,
-            'Fuel_System_Condition_enc':         1,
-            'Brake_Condition_enc':               2 if brake_life>60 else 1 if brake_life>30 else 0,
-            'Transmission_Condition_enc':        1,
-            'Cooling_System_Condition_enc':      2 if coolant_lvl>0.6 else 1,
-            'Coolant_Level_Status_enc':          cool_status,
-            'Fuel_Consumption_Lhr_Status_enc':   fuel_status,
-            'Brake_Replacement_Needed_enc':      br_enc,
-            'Engine_Replacement_Needed_enc':     1 if engine_life < 15 else 0,
-            'Tyre_Replacement_Needed_enc':       1 if tyre_life < 15 else 0,
-            'Hydraulic_Replacement_Needed_enc':  1 if hydraulic_life < 15 else 0,
-            'Electrical_Replacement_Needed_enc': 1 if battery_life < 15 else 0,
-            'Days_Since_Last_Maintenance':       days_since_pm,
-            'Electrical_Condition_enc':          2 if battery_life>60 else 1 if battery_life>30 else 0,
+            'Engine_Life_Remaining_pct': engine_life, 'Brake_Life_Remaining_pct': brake_life,
+            'Tyre_Life_Remaining_pct': tyre_life, 'Hydraulic_Life_Remaining_pct': hydraulic_life,
+            'Battery_Life_Remaining_pct': battery_life, 'Engine_Temp_C_Status_enc': eng_st,
+            'Oil_Pressure_bar_Status_enc': oil_st, 'Vibration_mms_Status_enc': vib_st,
+            'Hydraulic_Pressure_bar_Status_enc': hyd_st, 'Battery_Voltage_V_Status_enc': bat_st,
+            'Fuel_System_Condition_enc': 1, 'Brake_Condition_enc': 2 if brake_life>60 else 1 if brake_life>30 else 0,
+            'Transmission_Condition_enc': 1, 'Cooling_System_Condition_enc': 2 if coolant_lvl>0.6 else 1,
+            'Coolant_Level_Status_enc': cool_st, 'Fuel_Consumption_Lhr_Status_enc': fuel_st,
+            'Brake_Replacement_Needed_enc': br_enc,
+            'Engine_Replacement_Needed_enc': 1 if engine_life<15 else 0,
+            'Tyre_Replacement_Needed_enc': 1 if tyre_life<15 else 0,
+            'Hydraulic_Replacement_Needed_enc': 1 if hydraulic_life<15 else 0,
+            'Electrical_Replacement_Needed_enc': 1 if battery_life<15 else 0,
+            'Days_Since_Last_Maintenance': days_since_pm,
+            'Electrical_Condition_enc': 2 if battery_life>60 else 1 if battery_life>30 else 0,
         }
         issues = diagnose_machine(row_dict)
 
         if not issues or (len(issues)==1 and issues[0][0]=="All Systems"):
-            st.markdown("""<div class='alert-ok'>
-                <b>🟢 All Systems Normal</b><br>
-                <span style='color:#94a3b8'>No immediate action required. Continue regular monitoring.</span>
-            </div>""", unsafe_allow_html=True)
+            st.markdown("<div class='alert-ok'><b>🟢 All Systems Normal</b><br><span style='color:#94a3b8'>No immediate action required. Continue regular monitoring.</span></div>", unsafe_allow_html=True)
         else:
             for comp, problem, action, sev in issues:
-                css   = "alert-critical" if sev=="CRITICAL" else "alert-high" if sev=="HIGH" else "alert-medium"
+                css    = "alert-critical" if sev=="CRITICAL" else "alert-high" if sev=="HIGH" else "alert-medium"
                 s_icon = "🔴" if sev=="CRITICAL" else "🟠" if sev=="HIGH" else "🟡"
-                is_rep = "REPLACE" in action
-                rep_badge = (" <span style='background:#ef4444;color:white;border-radius:3px;"
-                             "padding:1px 7px;font-size:11px;margin-left:6px'>REPLACEMENT NEEDED</span>"
-                             if is_rep else "")
-                st.markdown(
-                    "<div class='" + css + "'>"
-                    "<b>" + s_icon + " [" + sev + "] " + comp + "</b>" + rep_badge + "<br>"
-                    "<span style='color:#94a3b8;font-size:13px'>Problem: " + problem + "</span><br>"
-                    "<span style='color:#e2e8f0;font-size:13px'>Action: <b>" + action + "</b></span>"
-                    "</div>", unsafe_allow_html=True)
+                rep    = ('<span style="background:#ef4444;color:white;border-radius:3px;padding:1px 7px;font-size:11px;margin-left:6px">REPLACEMENT NEEDED</span>' if "REPLACE" in action else "")
+                st.markdown("<div class='" + css + "'><b>" + s_icon + " [" + sev + "] " + comp + "</b>" + rep + "<br><span style='color:#94a3b8;font-size:13px'>Problem: " + problem + "</span><br><span style='color:#e2e8f0;font-size:13px'>Action: <b>" + action + "</b></span></div>", unsafe_allow_html=True)
 
-        # ── Save prediction to SQLite ──────────────────────────────────
-        db_path = os.path.join(OUT, "hemm_alerts")
-        if not os.path.exists(db_path):
-            db_path = os.path.join(OUT, "hemm_alerts.db")
+        # ── WHAT-IF ANALYSIS ──────────────────────────────────────────
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>What-If Analysis — Impact of Maintenance Actions</div>", unsafe_allow_html=True)
+        st.caption("Shows how failure probability changes if you take each action today")
+
+        scenarios = [
+            ("Replace Brakes",      {'Brake_Life_Remaining_pct': 95, 'Brake_Replacement_Needed_enc': 0, 'Brake_Condition_enc': 2}),
+            ("Replace Engine",      {'Engine_Life_Remaining_pct': 95, 'Engine_Replacement_Needed_enc': 0, 'Engine_Condition_enc': 2}),
+            ("Replace Tyres",       {'Tyre_Life_Remaining_pct': 95, 'Tyre_Replacement_Needed_enc': 0, 'Tyre_Condition_enc': 2}),
+            ("Full PM Service",     {'Engine_Life_Remaining_pct': 90, 'Brake_Life_Remaining_pct': 90, 'Tyre_Life_Remaining_pct': 90, 'Days_Since_Last_Maintenance': 0}),
+            ("Fix Hydraulics",      {'Hydraulic_Life_Remaining_pct': 95, 'Hydraulic_Replacement_Needed_enc': 0}),
+            ("Replace Battery",     {'Battery_Life_Remaining_pct': 95, 'Electrical_Replacement_Needed_enc': 0}),
+        ]
+
+        whatif_rows = []
+        for scenario_name, overrides in scenarios:
+            new_input = {c: input_data.get(c, 0) for c in feat_cols}
+            for col_name, val_override in overrides.items():
+                if col_name in new_input:
+                    new_input[col_name] = val_override
+            new_row   = pd.DataFrame([new_input])
+            new_prob  = float(ens.predict_proba(new_row)[0][1]) * 100
+            reduction = fail_prob - new_prob
+            new_lvl   = get_alert_level(new_prob / 100)
+            whatif_rows.append({
+                'Action':              scenario_name,
+                'Current Prob':        f"{fail_prob:.1f}%",
+                'After Action':        f"{new_prob:.1f}%",
+                'Reduction':           f"-{reduction:.1f}%",
+                'New Alert Level':     new_lvl,
+                'Effective?':          "Yes" if reduction > 5 else "Minimal impact",
+            })
+
+        whatif_df = pd.DataFrame(whatif_rows)
+
+        # Bar chart
+        fig_w, ax_w = plt.subplots(figsize=(12, 4))
+        fig_w.patch.set_facecolor('#111827')
+        ax_w.set_facecolor('#0f172a')
+        actions  = [r['Action'] for r in whatif_rows]
+        probs    = [float(r['After Action'].replace('%','')) for r in whatif_rows]
+        reductions = [fail_prob - p for p in probs]
+        bar_colors = ['#22c55e' if r > 20 else '#3b82f6' if r > 5 else '#64748b' for r in reductions]
+        bars_w = ax_w.bar(actions, probs, color=bar_colors, alpha=0.9, width=0.55)
+        ax_w.axhline(fail_prob, color='#ef4444', lw=2, linestyle='--', label=f'Current: {fail_prob:.1f}%')
+        ax_w.axhline(30, color='#f97316', lw=1, linestyle=':', alpha=0.7, label='HIGH threshold (30%)')
+        ax_w.set_ylabel('Failure Probability (%)', color='#94a3b8', fontsize=10)
+        ax_w.tick_params(colors='#94a3b8', labelsize=8)
+        ax_w.set_title('Failure Probability After Each Maintenance Action', color='#e2e8f0', fontsize=11, fontweight='bold')
+        ax_w.legend(facecolor='#1e293b', labelcolor='#e2e8f0', fontsize=9)
+        for spine in ax_w.spines.values(): spine.set_color('#1e293b')
+        for bar, prob_val in zip(bars_w, probs):
+            ax_w.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.5,
+                      f'{prob_val:.1f}%', ha='center', color='#e2e8f0', fontsize=9, fontweight='bold')
+        st.pyplot(fig_w, use_container_width=True)
+        plt.close()
+
+        # Best action
+        best_action = min(whatif_rows, key=lambda r: float(r['After Action'].replace('%','')))
+        best_prob   = float(best_action['After Action'].replace('%',''))
+        best_red    = fail_prob - best_prob
+        if best_red > 2:
+            st.markdown(f"""
+            <div style='background:#0f2d1a;border:1px solid #22c55e;border-radius:8px;padding:14px;margin:10px 0'>
+                <b style='color:#22c55e'>Best action: {best_action['Action']}</b><br>
+                <span style='color:#86efac'>Reduces failure probability from {fail_prob:.1f}% to {best_prob:.1f}% — saving {best_red:.1f}% risk</span>
+            </div>""", unsafe_allow_html=True)
+
+        st.dataframe(whatif_df, use_container_width=True, hide_index=True)
+
+        # ── MAINTENANCE SCHEDULE ──────────────────────────────────────
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("<div class='section-title'>Recommended Maintenance Schedule</div>", unsafe_allow_html=True)
+
+        critical_issues = [i for i in issues if i[3] == 'CRITICAL']
+        high_issues     = [i for i in issues if i[3] == 'HIGH']
+        replace_items   = [i[0] for i in issues if 'REPLACE' in i[2]]
+
+        if days_left <= 3:
+            urgency = "STOP MACHINE IMMEDIATELY"
+            urg_color = "#ef4444"
+        elif days_left <= 7:
+            urgency = "URGENT — Act within 3 days"
+            urg_color = "#f97316"
+        elif days_left <= 14:
+            urgency = "HIGH PRIORITY — Act this week"
+            urg_color = "#eab308"
+        else:
+            urgency = "SCHEDULE — Plan within 2 weeks"
+            urg_color = "#22c55e"
+
+        st.markdown(f"""
+        <div style='background:#111827;border:2px solid {urg_color};border-radius:10px;padding:18px;margin:10px 0'>
+            <div style='font-size:14px;font-weight:500;color:{urg_color};margin-bottom:14px'>{urgency}</div>""",
+            unsafe_allow_html=True)
+
+        schedule = []
+        day_offset = 0
+
+        if days_left <= 3:
+            schedule.append((day_offset, "Day 1", "#ef4444", "Stop machine immediately — do not operate until inspected"))
+            day_offset += 1
+
+        if replace_items:
+            parts_str = ", ".join(replace_items[:3])
+            schedule.append((day_offset, f"Day {day_offset+1}-{day_offset+2}", "#f97316", f"Order replacement parts: {parts_str}"))
+            day_offset += 2
+
+        if critical_issues:
+            schedule.append((day_offset, f"Day {day_offset+1}", "#f97316", "Assign senior mechanic — inspect all CRITICAL components"))
+            day_offset += 1
+
+        if replace_items:
+            schedule.append((day_offset, f"Day {day_offset+1}-{day_offset+2}", "#eab308", f"Replace components: {', '.join(replace_items[:3])}"))
+            day_offset += 2
+
+        if high_issues:
+            schedule.append((day_offset, f"Day {day_offset+1}", "#3b82f6", "Service HIGH risk components: " + ", ".join([i[0] for i in high_issues[:2]])))
+            day_offset += 1
+
+        schedule.append((day_offset, f"Day {day_offset+1}", "#3b82f6", "Run system tests — check all sensors and performance"))
+        day_offset += 1
+        schedule.append((day_offset, f"Day {day_offset+1}", "#22c55e", "Return machine to operation — monitor closely for 48 hours"))
+        day_offset += 1
+        schedule.append((day_offset, f"Week {(day_offset//7)+2}", "#22c55e", "Schedule next PM and update maintenance log"))
+
+        for _, day_label, sched_color, task in schedule:
+            st.markdown(
+                "<div style='display:flex;gap:12px;align-items:flex-start;padding:8px 0;border-bottom:1px solid #1e293b'>"
+                "<span style='color:" + sched_color + ";font-weight:600;min-width:80px;font-size:12px'>" + day_label + "</span>"
+                "<span style='color:#e2e8f0;font-size:13px'>" + task + "</span>"
+                "</div>",
+                unsafe_allow_html=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # ── SAVE TO DB + DOWNLOAD ─────────────────────────────────────
         try:
+            db_path = os.path.join(OUT, "hemm_alerts")
+            if not os.path.exists(db_path):
+                db_path = os.path.join(OUT, "hemm_alerts.db")
             conn_p = sqlite3.connect(db_path)
-            pred_record = pd.DataFrame([{
-                'run_timestamp':        pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'Equipment_ID':         'MANUAL_INPUT',
-                'Equipment_Type':       eq_type_input,
-                'Failure_Probability':  round(fail_prob, 2),
-                'Days_to_Failure':      days_left,
-                'Alert_Level':          alert_level,
-                'Shift':                shift_input,
-                'Operator_Experience':  op_exp,
-                'Critical_Issues':      sum(1 for _,_,_,s in issues if s=='CRITICAL'),
-                'Needs_Replacement':    any('REPLACE' in a for _,_,a,_ in issues),
-            }])
-            pred_record.to_sql("manual_predictions", conn_p, if_exists="append", index=False)
+            pd.DataFrame([{
+                'run_timestamp':       pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'Equipment_ID':        prefill_eq if use_prefill else 'MANUAL_INPUT',
+                'Equipment_Type':      eq_type_input,
+                'Failure_Probability': round(fail_prob, 2),
+                'Days_to_Failure':     days_left,
+                'Alert_Level':         alert_level,
+                'Shift':               shift_input,
+                'Operator_Experience': op_exp,
+                'Critical_Issues':     len(critical_issues),
+                'Needs_Replacement':   len(replace_items) > 0,
+            }]).to_sql("manual_predictions", conn_p, if_exists="append", index=False)
             conn_p.close()
-            st.success("Prediction saved to database (manual_predictions table)")
+            st.success("Prediction saved to database")
         except Exception as e:
             st.info("Note: Could not save to database — " + str(e))
 
-        # ── Download prediction report ─────────────────────────────────
         report_txt = (
             "NALCO HEMM — SINGLE MACHINE PREDICTION REPORT\n"
             "=" * 50 + "\n"
             "Generated  : " + pd.Timestamp.now().strftime('%d %b %Y %H:%M') + "\n"
             "Equipment  : " + eq_type_input + "\n"
+            "Machine ID : " + (prefill_eq if use_prefill else "Manual Input") + "\n"
             "Shift      : " + shift_input + "\n"
             "Operator   : " + str(op_exp) + " years experience\n\n"
-            "PREDICTION RESULT\n"
-            "-" * 30 + "\n"
+            "PREDICTION RESULT\n" + "-"*30 + "\n"
             "Alert Level        : " + alert_level + "\n"
             "Failure Probability: " + str(round(fail_prob,1)) + "%\n"
             "Days to Failure    : " + str(days_left) + " days\n\n"
-            "SENSOR READINGS\n"
-            "-" * 30 + "\n"
-            "Engine Temp        : " + str(engine_temp) + " C\n"
-            "Oil Pressure       : " + str(oil_pressure) + " bar\n"
-            "Vibration          : " + str(vibration) + " mm/s\n"
-            "Hydraulic Pressure : " + str(hydraulic_p) + " bar\n\n"
-            "DIAGNOSIS\n"
-            "-" * 30 + "\n"
+            "MAINTENANCE SCHEDULE\n" + "-"*30 + "\n"
         )
+        for _, day_label, _, task in schedule:
+            report_txt += day_label + ": " + task + "\n"
+        report_txt += "\nDIAGNOSIS\n" + "-"*30 + "\n"
         for comp, problem, action, sev in issues:
             report_txt += "[" + sev + "] " + comp + " — " + action + "\n"
 
         st.download_button(
-            label="Download Prediction Report",
+            label="Download Full Prediction Report",
             data=report_txt,
-            file_name="hemm_single_prediction.txt",
-            mime="text/plain"
+            file_name="hemm_prediction_" + eq_type_input.replace(' ','_') + ".txt",
+            mime="text/plain",
+            use_container_width=True
         )
 
 
